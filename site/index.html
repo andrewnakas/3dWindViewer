@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>3D Wind Viewer — HRRR CONUS</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="map"></div>
+
+  <div id="panel">
+    <h1>3D Wind Viewer</h1>
+    <div class="sub">NOAA HRRR · CONUS · <span id="init-time">loading…</span></div>
+
+    <label for="level-select">Level</label>
+    <select id="level-select"></select>
+
+    <label class="row">
+      <input type="checkbox" id="volumetric"> Volumetric (stack levels)
+    </label>
+
+    <label for="particles-select">Particles</label>
+    <select id="particles-select">
+      <option value="16384">16k</option>
+      <option value="65536" selected>65k</option>
+      <option value="262144">262k</option>
+    </select>
+
+    <label for="exaggeration">Terrain exaggeration <span id="exag-val">1.5</span></label>
+    <input type="range" id="exaggeration" min="0" max="3" step="0.1" value="1.5">
+
+    <label for="speed-factor">Particle speed <span id="speed-val">1.0</span></label>
+    <input type="range" id="speed-factor" min="0.2" max="3" step="0.1" value="1">
+
+    <canvas id="legend" width="220" height="34"></canvas>
+
+    <div class="attrib">
+      Data: <a href="https://dynamical.org/catalog/noaa-hrrr-forecast-48-hour-virtual/" target="_blank">NOAA HRRR via dynamical.org</a><br>
+      Terrain: AWS Terrain Tiles · Map: © <a href="https://carto.com/attributions" target="_blank">CARTO</a>, © OpenStreetMap
+    </div>
+  </div>
+
+  <div id="timebar">
+    <button id="play" title="Play/pause">▶</button>
+    <input type="range" id="time-slider" min="0" max="48" step="1" value="0">
+    <div id="time-label">+0 h</div>
+  </div>
+
+  <div id="error" hidden></div>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

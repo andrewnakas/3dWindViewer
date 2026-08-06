@@ -1,0 +1,104 @@
+// Loads atlas PNGs into GL textures with prefetch + LRU eviction.
+
+const CACHE_MAX = 6;
+
+export class FrameManager {
+  constructor(gl, meta, basePath = "data/") {
+    this.gl = gl;
+    this.meta = meta;
+    this.basePath = basePath;
+    this.textures = new Map(); // lead -> WebGLTexture
+    this.loading = new Map();  // lead -> Promise
+    this.lru = [];
+    this.version = encodeURIComponent(meta.init_time);
+    this.leads = meta.frames.map((f) => f.lead_hours);
+  }
+
+  nearestLead(t) {
+    return this.leads.reduce((a, b) => (Math.abs(b - t) < Math.abs(a - t) ? b : a));
+  }
+
+  // Continuous time t (hours) -> pair of frame textures + mix, using whatever
+  // is loaded; kicks off loads for what's missing. Handles non-uniform lead
+  // spacing (e.g. sparse test builds).
+  getPair(t) {
+    let i = this.leads.findIndex((l, k) => k + 1 >= this.leads.length || this.leads[k + 1] > t);
+    i = Math.max(0, Math.min(this.leads.length - 2, i));
+    const a = this.leads[i];
+    const b = this.leads[i + 1];
+    this.ensure(a);
+    this.ensure(b);
+    const texA = this.textures.get(a);
+    const texB = this.textures.get(b);
+    if (texA && texB) {
+      this.touch(a); this.touch(b);
+      const span = Math.max(b - a, 1e-6);
+      return { texA, texB, mix: Math.max(0, Math.min(1, (t - a) / span)) };
+    }
+    const any = texA || texB || this.newestLoaded();
+    return any ? { texA: any, texB: any, mix: 0 } : null;
+  }
+
+  prefetch(t, count = 2) {
+    const i = Math.floor(t);
+    for (let k = 1; k <= count; k++) {
+      const idx = i + k;
+      if (idx < this.leads.length) this.ensure(this.leads[idx]);
+    }
+  }
+
+  newestLoaded() {
+    return this.lru.length ? this.textures.get(this.lru[this.lru.length - 1]) : null;
+  }
+
+  ensure(lead) {
+    if (this.textures.has(lead) || this.loading.has(lead)) return;
+    const entry = this.meta.frames.find((f) => f.lead_hours === lead);
+    if (!entry) return;
+    const url = `${this.basePath}${entry.file}?v=${this.version}`;
+    const p = fetch(url)
+      .then((r) => {
+        if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
+        return r.blob();
+      })
+      .then((blob) => createImageBitmap(blob, { premultiplyAlpha: "none" }))
+      .then((bmp) => {
+        this.textures.set(lead, this.upload(bmp));
+        bmp.close();
+        this.touch(lead);
+        this.evict();
+      })
+      .catch((e) => console.error("frame load failed", lead, e))
+      .finally(() => this.loading.delete(lead));
+    this.loading.set(lead, p);
+  }
+
+  upload(bitmap) {
+    const gl = this.gl;
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    return tex;
+  }
+
+  touch(lead) {
+    const i = this.lru.indexOf(lead);
+    if (i >= 0) this.lru.splice(i, 1);
+    this.lru.push(lead);
+  }
+
+  evict() {
+    while (this.lru.length > CACHE_MAX) {
+      const lead = this.lru.shift();
+      const tex = this.textures.get(lead);
+      if (tex) this.gl.deleteTexture(tex);
+      this.textures.delete(lead);
+    }
+  }
+}
