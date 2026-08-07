@@ -23,7 +23,7 @@ atlas, particles drawn at each level's altitude above 3D terrain
 - **Data**: [NOAA HRRR via dynamical.org](https://dynamical.org/catalog/noaa-hrrr-forecast-48-hour-virtual/) — the "virtual" map-optimized dataset with every vertical level. Read with `dynamical-catalog` + xarray in `pipeline/`.
 - **No data in git**: `site/data/` exists only inside the Pages deployment artifact; a failed build leaves the previous forecast live.
 - **Terrain**: AWS Terrain Tiles (terrarium encoding) with adjustable exaggeration; Carto Dark Matter basemap.
-- **Particles**: classic [webgl-wind](https://github.com/mapbox/webgl-wind) technique upgraded to WebGL2 — ping-pong float state textures, advection in a fragment shader, streaks drawn as `GL_LINES` at pressure-level altitudes (standard-atmosphere heights). "Volumetric" mode stacks 8 levels from the surface to the jet stream.
+- **Particles**: [webgl-wind](https://github.com/mapbox/webgl-wind)-style GPU advection upgraded to WebGL2 with a **continuous vertical coordinate** — particles rise and sink with HRRR's vertical velocity (omega, atlas B channel), so orographic uplift and convection are real 3D motion between levels. Levels sit at each run's actual mean geopotential heights, and below-ground pressure levels (e.g. 925 hPa over the Rockies) are masked out using surface pressure. Falls back from float to packed-RGBA8 state on GPUs without float rendering (iOS).
 
 ## Local development
 

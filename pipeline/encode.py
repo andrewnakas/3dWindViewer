@@ -1,6 +1,13 @@
-"""Quantize regridded wind fields into texture-atlas PNGs + meta.json."""
+"""Quantize regridded wind fields into texture-atlas PNGs + meta.json.
+
+Atlas channels per level tile:
+  R = u (east wind), G = v (north wind), B = omega (vertical velocity, Pa/s),
+  A = valid mask (inside HRRR domain AND level above ground).
+Per-level min/max scaling for each channel lives in meta.json.
+"""
 
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -20,59 +27,64 @@ from config import (
     TILE_H,
     TILE_W,
     WEST,
-    height_meters,
 )
+
+GRAVITY = 9.80665
+RHO0, SCALE_H = 1.225, 8500.0  # standard-atmosphere density profile
+
+
+def w_factor(height_m: float) -> float:
+    """m/s of upward motion per Pa/s of omega at this altitude: w = -omega/(rho g)."""
+    rho = RHO0 * math.exp(-height_m / SCALE_H)
+    return -1.0 / (rho * GRAVITY)
 
 
 def compute_scales(frames):
-    """Per-level u/v min/max over all frames (list of (nlev,H,W,2) arrays)."""
-    stack = np.stack(frames)  # (nframes, nlev, H, W, 2)
+    """Per-level min/max of u, v, omega over all frames.
+
+    frames: list of (nlev, H, W, 3) arrays.
+    """
+    stack = np.stack(frames)  # (nframes, nlev, H, W, 3)
     scales = []
     for i in range(stack.shape[1]):
-        u = stack[:, i, :, :, 0]
-        v = stack[:, i, :, :, 1]
-        umin, umax = np.nanmin(u), np.nanmax(u)
-        vmin, vmax = np.nanmin(v), np.nanmax(v)
-        upad = max((umax - umin) * SCALE_PAD, 0.5)
-        vpad = max((vmax - vmin) * SCALE_PAD, 0.5)
-        scales.append(
-            {
-                "uMin": float(umin - upad),
-                "uMax": float(umax + upad),
-                "vMin": float(vmin - vpad),
-                "vMax": float(vmax + vpad),
-            }
-        )
+        entry = {}
+        for name, k, min_pad in (("u", 0, 0.5), ("v", 1, 0.5), ("w", 2, 0.05)):
+            vals = stack[:, i, :, :, k]
+            lo, hi = float(np.nanmin(vals)), float(np.nanmax(vals))
+            pad = max((hi - lo) * SCALE_PAD, min_pad)
+            entry[f"{name}Min"] = lo - pad
+            entry[f"{name}Max"] = hi + pad
+        scales.append(entry)
     return scales
 
 
-def encode_frame(frame, scales):
-    """frame: (nlev, TILE_H, TILE_W, 2) float -> RGBA atlas array."""
+def encode_frame(frame, valid, scales):
+    """frame: (nlev, TILE_H, TILE_W, 3); valid: (nlev, TILE_H, TILE_W) bool."""
     atlas = np.zeros((ATLAS_H, ATLAS_W, 4), dtype=np.uint8)
     for i in range(frame.shape[0]):
         r0 = (i // ATLAS_COLS) * TILE_H
         c0 = (i % ATLAS_COLS) * TILE_W
-        u = frame[i, :, :, 0].astype(np.float64)
-        v = frame[i, :, :, 1].astype(np.float64)
         s = scales[i]
-        valid = ~(np.isnan(u) | np.isnan(v))
-        uq = np.clip((u - s["uMin"]) / (s["uMax"] - s["uMin"]), 0, 1)
-        vq = np.clip((v - s["vMin"]) / (s["vMax"] - s["vMin"]), 0, 1)
+        ok = valid[i] & ~np.isnan(frame[i]).any(axis=-1)
         tile = atlas[r0 : r0 + TILE_H, c0 : c0 + TILE_W]
-        tile[:, :, 0] = np.where(valid, np.round(uq * 255), 0).astype(np.uint8)
-        tile[:, :, 1] = np.where(valid, np.round(vq * 255), 0).astype(np.uint8)
-        tile[:, :, 3] = np.where(valid, 255, 0).astype(np.uint8)
+        for ch, (lo, hi) in enumerate(
+            ((s["uMin"], s["uMax"]), (s["vMin"], s["vMax"]), (s["wMin"], s["wMax"]))
+        ):
+            q = np.clip((frame[i, :, :, ch].astype(np.float64) - lo) / (hi - lo), 0, 1)
+            tile[:, :, ch] = np.where(ok, np.round(q * 255), 0).astype(np.uint8)
+        tile[:, :, 3] = np.where(ok, 255, 0).astype(np.uint8)
     return atlas
 
 
-def write_output(out_dir, frames_by_lead, scales, init_time_iso):
+def write_output(out_dir, frames_by_lead, scales, init_time_iso, heights):
+    """frames_by_lead: {lead: (frame, valid)}; heights: per-level meters ASL."""
     out = Path(out_dir)
     (out / "frames").mkdir(parents=True, exist_ok=True)
 
     frame_entries = []
-    for lead, frame in sorted(frames_by_lead.items()):
+    for lead, (frame, valid) in sorted(frames_by_lead.items()):
         name = f"frames/f{lead:02d}.png"
-        atlas = encode_frame(frame, scales)
+        atlas = encode_frame(frame, valid, scales)
         Image.fromarray(atlas, "RGBA").save(out / name, optimize=True)
         frame_entries.append({"lead_hours": lead, "file": name})
 
@@ -89,8 +101,9 @@ def write_output(out_dir, frames_by_lead, scales, init_time_iso):
                 "id": lid,
                 "kind": kind,
                 "value": value,
-                "heightMeters": height_meters(lid, kind, value),
-                **scales[i],
+                "heightMeters": round(float(heights[i]), 1),
+                "wFactor": 0.0 if kind == "height_agl" else round(w_factor(heights[i]), 5),
+                **{k: round(v, 3) for k, v in scales[i].items()},
             }
             for i, (lid, kind, value) in enumerate(LEVELS)
         ],

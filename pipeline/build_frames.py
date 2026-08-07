@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 
-from config import LEAD_HOURS, LEVELS, PRESSURE_LEVELS, TILE_H, TILE_W
+from config import LEAD_HOURS, LEVELS, PRESSURE_LEVELS, TILE_H, TILE_W, height_meters
 from encode import compute_scales, write_output
 from hrrr_source import open_datasets, pick_init
 from reproject import build_index_map, regrid, rotate_winds
@@ -25,7 +25,8 @@ SFC_VARS = [("wind_u_10m", "wind_v_10m"), ("wind_u_80m", "wind_v_80m")]
 def build_frame(sfc, prs, init, lead, index_map, attempts=3):
     """Read + regrid + rotate all levels for one lead hour.
 
-    Returns (nlev, TILE_H, TILE_W, 2) float16.
+    Returns (frame, valid): (nlev, TILE_H, TILE_W, 3) float16 [u, v, omega]
+    and a (nlev, TILE_H, TILE_W) above-ground/in-domain mask.
     """
     last_err = None
     for attempt in range(attempts):
@@ -39,17 +40,24 @@ def build_frame(sfc, prs, init, lead, index_map, attempts=3):
 
 
 def _build_frame(sfc, prs, init, lead, index_map):
-    frame = np.empty((len(LEVELS), TILE_H, TILE_W, 2), dtype=np.float16)
+    nlev = len(LEVELS)
+    frame = np.zeros((nlev, TILE_H, TILE_W, 3), dtype=np.float16)
+    valid = np.zeros((nlev, TILE_H, TILE_W), dtype=bool)
+    domain = index_map["valid"]
 
     sfc_t = sfc.sel(init_time=init).isel(lead_time=lead)
+    psfc = regrid(sfc_t["pressure_surface"].values, index_map)  # Pa
+
     for i, (uname, vname) in enumerate(SFC_VARS):
         u = regrid(sfc_t[uname].values, index_map)
         v = regrid(sfc_t[vname].values, index_map)
         frame[i, :, :, 0], frame[i, :, :, 1] = rotate_winds(u, v, index_map)
+        valid[i] = domain  # AGL levels are above ground by definition
 
     prs_t = prs.sel(init_time=init).isel(lead_time=lead)
     u_slab = prs_t.wind_u.values  # (y, x, nplev)
     v_slab = prs_t.wind_v.values
+    w_slab = prs_t.vertical_velocity.values  # omega, Pa/s
     plev_axis = list(prs.pressure_level.values)
     for j, p in enumerate(PRESSURE_LEVELS):
         k = plev_axis.index(p)
@@ -57,10 +65,28 @@ def _build_frame(sfc, prs, init, lead, index_map):
         v = regrid(v_slab[:, :, k], index_map)
         idx = 2 + j
         frame[idx, :, :, 0], frame[idx, :, :, 1] = rotate_winds(u, v, index_map)
+        frame[idx, :, :, 2] = regrid(w_slab[:, :, k], index_map)
+        # level is above ground where its pressure is below surface pressure
+        valid[idx] = domain & (p * 100.0 <= np.nan_to_num(psfc, nan=0.0))
 
-    if np.isnan(frame[:, TILE_H // 2, TILE_W // 2, :]).any():
+    if np.isnan(frame[:, TILE_H // 2, TILE_W // 2, :2]).any():
         raise ValueError(f"lead {lead}: NaN wind at domain center")
-    return frame
+    return frame, valid
+
+
+def read_heights(prs, init):
+    """Domain-mean geopotential height per level (m ASL), read once at lead 0.
+    Falls back to standard atmosphere per level on failure."""
+    out = [10.0, 80.0]
+    try:
+        gh = prs.sel(init_time=init).isel(lead_time=0).geopotential_height.values
+        plev_axis = list(prs.pressure_level.values)
+        for p in PRESSURE_LEVELS:
+            out.append(float(np.nanmean(gh[:, :, plev_axis.index(p)])))
+    except Exception as e:  # noqa: BLE001
+        log.warning("geopotential height read failed (%s); using std atmosphere", e)
+        out = [height_meters(lid, kind, value) for lid, kind, value in LEVELS]
+    return out
 
 
 def main():
@@ -81,6 +107,7 @@ def main():
     log.info("init=%s leads=%s", init_iso, leads)
 
     index_map = build_index_map(prs.x.values, prs.y.values)
+    heights = read_heights(prs, init)
 
     frames_by_lead = {}
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
@@ -90,9 +117,8 @@ def main():
             frames_by_lead[lead] = fut.result()
             log.info("lead %02d done (%d/%d)", lead, len(frames_by_lead), len(leads))
 
-    ordered = [frames_by_lead[t] for t in sorted(frames_by_lead)]
-    scales = compute_scales(ordered)
-    meta = write_output(args.out, frames_by_lead, scales, init_iso)
+    scales = compute_scales([f for f, _ in frames_by_lead.values()])
+    meta = write_output(args.out, frames_by_lead, scales, init_iso, heights)
 
     log.info(
         "wrote %d frames to %s in %.1f min (init %s)",

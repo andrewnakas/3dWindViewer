@@ -1,33 +1,78 @@
 // GLSL for the GPU particle system (WebGL2 / GLSL ES 3.00).
 //
-// Two state-texture modes, chosen at runtime:
-//  - FLOAT_STATE: RGBA32F state (RG = pos, B = age). Needs EXT_color_buffer_float.
-//  - byte mode:   RGBA8 state, position packed hi/lo per axis (webgl-wind style:
-//                 rg = fine, ba = coarse). Works on every WebGL2 device (iOS).
-//                 No age channel -> stochastic respawn.
-// Particle speed/color is sampled from the wind atlas in the draw shader in
-// both modes.
+// One particle system spans a vertical stack of 1..MAX_STACK levels. Each
+// particle carries (x, y) plus a continuous vertical coordinate sigma in
+// [0,1] across the stack; the model's vertical velocity (omega, atlas B
+// channel) moves particles between levels, so orographic uplift and
+// convection are real 3D motion. A stack of 1 degenerates to classic
+// single-level advection.
+//
+// State is two MRT targets (ping-ponged):
+//   pos: FLOAT_STATE -> RG = xy;  byte mode -> webgl-wind packed hi/lo xy
+//   aux: R = sigma, G = age/255 (float mode; byte mode uses stochastic drop)
+//
+// Atlas tile channels: R=u, G=v, B=omega, A=valid (in-domain AND above-ground).
+
+export const MAX_STACK = 12;
 
 export const QUAD_VERT = `#version 300 es
 precision highp float;
 out vec2 v_uv;
 void main() {
-  // fullscreen triangle
   vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
   v_uv = p;
   gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
 }`;
 
-const STATE_HELPERS = `
+const COMMON = `
 #ifdef FLOAT_STATE
 vec2 statePos(vec4 s) { return s.rg; }
 #else
 vec2 statePos(vec4 s) { return s.ba + s.rg / 255.0; }
-vec4 encodeState(vec2 p) { return vec4(fract(p * 255.0), floor(p * 255.0) / 255.0); }
 #endif
 
 float rand(vec2 co) {
   return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+uniform sampler2D u_frameA;
+uniform sampler2D u_frameB;
+uniform float u_frameMix;
+uniform int u_stackLen;
+uniform vec2 u_tileOff[${MAX_STACK}];
+uniform vec4 u_uvScale[${MAX_STACK}];   // uMin, uMax, vMin, vMax
+uniform vec2 u_wScale[${MAX_STACK}];    // wMin, wMax (omega Pa/s)
+uniform float u_wFactor[${MAX_STACK}];  // m/s per Pa/s at this level
+uniform float u_height[${MAX_STACK}];   // meters ASL
+uniform vec2 u_tileScale;
+uniform vec2 u_clampMin;
+uniform vec2 u_clampMax;
+
+// Sampled wind at (pos, sigma): returns earth u, v (m/s), w (m/s), valid.
+vec4 sampleWind(vec2 pos, float sigma, out float heightM) {
+  float s = sigma * float(u_stackLen - 1);
+  int j = u_stackLen > 1 ? int(clamp(s, 0.0, float(u_stackLen - 2))) : 0;
+  int j1 = min(j + 1, u_stackLen - 1);
+  float f = u_stackLen > 1 ? clamp(s - float(j), 0.0, 1.0) : 0.0;
+  vec2 tl = clamp(pos, u_clampMin, u_clampMax) * u_tileScale;
+  vec4 a = mix(texture(u_frameA, u_tileOff[j] + tl), texture(u_frameB, u_tileOff[j] + tl), u_frameMix);
+  vec4 b = mix(texture(u_frameA, u_tileOff[j1] + tl), texture(u_frameB, u_tileOff[j1] + tl), u_frameMix);
+  vec3 wa = vec3(mix(u_uvScale[j].x, u_uvScale[j].y, a.r),
+                 mix(u_uvScale[j].z, u_uvScale[j].w, a.g),
+                 mix(u_wScale[j].x, u_wScale[j].y, a.b) * u_wFactor[j]);
+  vec3 wb = vec3(mix(u_uvScale[j1].x, u_uvScale[j1].y, b.r),
+                 mix(u_uvScale[j1].z, u_uvScale[j1].w, b.g),
+                 mix(u_wScale[j1].x, u_wScale[j1].y, b.b) * u_wFactor[j1]);
+  heightM = mix(u_height[j], u_height[j1], f);
+  // below-ground levels have alpha 0; blend so particles near masked layers die
+  return vec4(mix(wa, wb, f), min(a.a, b.a));
+}
+
+float gapMeters(float sigma) {
+  if (u_stackLen < 2) return 1.0;
+  float s = sigma * float(u_stackLen - 1);
+  int j = int(clamp(s, 0.0, float(u_stackLen - 2)));
+  return max(u_height[j + 1] - u_height[j], 1.0);
 }
 `;
 
@@ -35,85 +80,74 @@ export const UPDATE_FRAG = `#version 300 es
 precision highp float;
 
 in vec2 v_uv;
-out vec4 outState;
+layout(location = 0) out vec4 outPos;
+layout(location = 1) out vec4 outAux;
 
-uniform sampler2D u_state;
-uniform sampler2D u_frameA;
-uniform sampler2D u_frameB;
-uniform float u_frameMix;
-
-uniform vec2 u_tileOffset;   // atlas UV of tile origin
-uniform vec2 u_tileScale;    // tile extent in atlas UV
-uniform vec2 u_clampMin;     // half-texel clamp inside tile (tile-local 0..1)
-uniform vec2 u_clampMax;
-uniform vec2 u_uRange;       // uMin, uMax (m/s)
-uniform vec2 u_vRange;
+uniform sampler2D u_statePos;
+uniform sampler2D u_stateAux;
 uniform float u_north;
 uniform float u_lonSpan;
 uniform float u_latSpan;
-uniform float u_dt;          // simulated seconds per rendered frame
+uniform float u_dt;
 uniform float u_maxAge;
-uniform float u_time;        // random seed
+uniform float u_time;
 
-${STATE_HELPERS}
+${COMMON}
 
 void main() {
-  vec4 st = texture(u_state, v_uv);
-  vec2 pos = statePos(st);
+  vec4 sp = texture(u_statePos, v_uv);
+  vec4 sa = texture(u_stateAux, v_uv);
+  vec2 pos = statePos(sp);
+  float sigma = sa.r;
 
-  vec2 tuv = u_tileOffset + clamp(pos, u_clampMin, u_clampMax) * u_tileScale;
-  vec4 w = mix(texture(u_frameA, tuv), texture(u_frameB, tuv), u_frameMix);
-  float u = mix(u_uRange.x, u_uRange.y, w.r);
-  float v = mix(u_vRange.x, u_vRange.y, w.g);
-  float speedN = length(vec2(u, v)) / 60.0;
+  float heightM;
+  vec4 wind = sampleWind(pos, sigma, heightM);
 
   float lat = u_north - pos.y * u_latSpan;
-  float dlon = u * u_dt / (111320.0 * max(cos(radians(lat)), 0.05));
-  float dlat = v * u_dt / 110540.0;
+  float dlon = wind.x * u_dt / (111320.0 * max(cos(radians(lat)), 0.05));
+  float dlat = wind.y * u_dt / 110540.0;
   vec2 npos = pos + vec2(dlon / u_lonSpan, -dlat / u_latSpan);
+  float nsigma = sigma;
+  if (u_stackLen > 1) {
+    nsigma = clamp(sigma + (wind.z * u_dt) / gapMeters(sigma) / float(u_stackLen - 1), 0.0, 1.0);
+  }
 
-  bool oob = npos.x < 0.0 || npos.x > 1.0 || npos.y < 0.0 || npos.y > 1.0 || w.a < 0.5;
+  bool oob = npos.x < 0.0 || npos.x > 1.0 || npos.y < 0.0 || npos.y > 1.0 || wind.a < 0.5;
   vec2 seed = v_uv + fract(u_time);
-  vec2 spawn = vec2(rand(seed), rand(seed.yx * 1.71));
+  vec2 spawnPos = vec2(rand(seed), rand(seed.yx * 1.71));
+  float spawnSigma = rand(seed * 2.61);
 
 #ifdef FLOAT_STATE
-  float age = st.b + 1.0;
+  float age = sa.g * 255.0 + 1.0;
   float lifetime = u_maxAge * (0.5 + rand(v_uv * 7.13));
-  if (oob || age > lifetime) { npos = spawn; age = 0.0; }
-  outState = vec4(npos, age, 0.0);
+  if (oob || age > lifetime) { npos = spawnPos; nsigma = spawnSigma; age = 0.0; }
+  outPos = vec4(npos, 0.0, 1.0);
+  outAux = vec4(nsigma, age / 255.0, 0.0, 1.0);
 #else
-  // stochastic respawn: base rate + extra for fast particles (keeps density even)
+  float speedN = length(wind.xy) / 60.0;
   float drop = step(1.0 - (0.006 + speedN * 0.012), rand(seed * 3.37));
-  if (oob || drop > 0.5) npos = spawn;
-  // dither below the 16-bit quantum so slow particles don't freeze
+  if (oob || drop > 0.5) { npos = spawnPos; nsigma = spawnSigma; }
   npos += (vec2(rand(seed * 5.1), rand(seed * 9.3)) - 0.5) / 65280.0;
-  outState = encodeState(clamp(npos, 0.0, 1.0));
+  nsigma += (rand(seed * 6.7) - 0.5) / 255.0;  // dither vertical quantization
+  outPos = vec4(fract(clamp(npos, 0.0, 1.0) * 255.0), floor(clamp(npos, 0.0, 1.0) * 255.0) / 255.0);
+  outAux = vec4(clamp(nsigma, 0.0, 1.0), 0.0, 0.0, 1.0);
 #endif
 }`;
 
-// Draw particles as short streak segments (GL_LINES, 2 verts per particle).
 export const DRAW_VERT = `#version 300 es
 precision highp float;
 
-uniform sampler2D u_stateCurr;
-uniform sampler2D u_statePrev;
-uniform sampler2D u_frameA;
-uniform sampler2D u_frameB;
-uniform float u_frameMix;
-uniform vec2 u_tileOffset;
-uniform vec2 u_tileScale;
-uniform vec2 u_clampMin;
-uniform vec2 u_clampMax;
-uniform vec2 u_uRange;
-uniform vec2 u_vRange;
+uniform sampler2D u_statePosCurr;
+uniform sampler2D u_statePosPrev;
+uniform sampler2D u_stateAuxCurr;
 uniform int u_stateSize;
 uniform mat4 u_matrix;
 uniform float u_west;
 uniform float u_north;
 uniform float u_lonSpan;
 uniform float u_latSpan;
-uniform float u_alt;       // altitude in mercator z units (premultiplied)
-uniform float u_streak;    // tail extension factor
+uniform float u_altMerc;   // mercator z units per meter, incl. altitude scale
+uniform float u_streak;
 uniform float u_maxAge;
 
 out float v_speed;
@@ -121,38 +155,39 @@ out float v_alpha;
 
 const float PI = 3.141592653589793;
 
-${STATE_HELPERS}
+${COMMON}
 
 void main() {
   int pid = gl_VertexID / 2;
   int end = gl_VertexID - pid * 2;
   ivec2 tc = ivec2(pid % u_stateSize, pid / u_stateSize);
-  vec4 sc = texelFetch(u_stateCurr, tc, 0);
-  vec4 sp = texelFetch(u_statePrev, tc, 0);
+  vec4 sc = texelFetch(u_statePosCurr, tc, 0);
+  vec4 sp = texelFetch(u_statePosPrev, tc, 0);
+  vec4 aux = texelFetch(u_stateAuxCurr, tc, 0);
+  float sigma = aux.r;
 
   vec2 pc = statePos(sc);
   vec2 pp = statePos(sp);
-  if (distance(pc, pp) > 0.02) pp = pc;  // collapse respawn jumps
+  if (distance(pc, pp) > 0.02) pp = pc;
   vec2 pos = (end == 0) ? pc + (pp - pc) * u_streak : pc;
 
-  vec2 tuv = u_tileOffset + clamp(pc, u_clampMin, u_clampMax) * u_tileScale;
-  vec4 w = mix(texture(u_frameA, tuv), texture(u_frameB, tuv), u_frameMix);
-  float wu = mix(u_uRange.x, u_uRange.y, w.r);
-  float wv = mix(u_vRange.x, u_vRange.y, w.g);
-  v_speed = clamp(length(vec2(wu, wv)) / 60.0, 0.0, 1.0);
+  float heightM;
+  vec4 wind = sampleWind(pc, sigma, heightM);
+  v_speed = clamp(length(wind.xy) / 60.0, 0.0, 1.0);
 
   float lon = u_west + pos.x * u_lonSpan;
   float lat = u_north - pos.y * u_latSpan;
   float mx = (lon + 180.0) / 360.0;
-  float s = clamp(sin(radians(lat)), -0.9999, 0.9999);
-  float my = 0.5 - 0.25 * log((1.0 + s) / (1.0 - s)) / PI;
+  float sm = clamp(sin(radians(lat)), -0.9999, 0.9999);
+  float my = 0.5 - 0.25 * log((1.0 + sm) / (1.0 - sm)) / PI;
 
-  gl_Position = u_matrix * vec4(mx, my, u_alt, 1.0);
+  gl_Position = u_matrix * vec4(mx, my, heightM * u_altMerc, 1.0);
 
   float endDim = (end == 0) ? 0.1 : 1.0;
 #ifdef FLOAT_STATE
-  float fadeIn = clamp(sc.b / 10.0, 0.0, 1.0);
-  float fadeOut = 1.0 - smoothstep(0.6, 1.0, sc.b / u_maxAge);
+  float age = aux.g * 255.0;
+  float fadeIn = clamp(age / 10.0, 0.0, 1.0);
+  float fadeOut = 1.0 - smoothstep(0.6, 1.0, age / u_maxAge);
   v_alpha = fadeIn * fadeOut * endDim;
 #else
   v_alpha = 0.85 * endDim;
