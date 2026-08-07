@@ -1,6 +1,7 @@
 // Loads atlas PNGs into GL textures with prefetch + LRU eviction.
 
-const CACHE_MAX = 6;
+// Each cached frame is a ~20 MB GPU texture; keep the cap low for mobile GPUs.
+const CACHE_MAX = 4;
 
 export class FrameManager {
   constructor(gl, meta, basePath = "data/") {

@@ -215,14 +215,14 @@ void main() {
   float z = terr * u_exagMerc + max(heightM - terr, 8.0) * u_altMerc;
   gl_Position = u_matrix * vec4(mx, my, z, 1.0);
 
-  float endDim = (end == 0) ? 0.1 : 1.0;
+  float endDim = (end == 0) ? 0.2 : 1.0;
 #ifdef FLOAT_STATE
   float age = aux.g * 255.0;
   float fadeIn = clamp(age / 10.0, 0.0, 1.0);
   float fadeOut = 1.0 - smoothstep(0.6, 1.0, age / u_maxAge);
   v_alpha = fadeIn * fadeOut * endDim;
 #else
-  v_alpha = 0.85 * endDim;
+  v_alpha = 0.95 * endDim;
 #endif
 }`;
 

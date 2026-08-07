@@ -17,7 +17,7 @@ function fail(msg) {
 async function main() {
   let meta;
   try {
-    const r = await fetch("data/meta.json");
+    const r = await fetch(`data/meta.json?t=${Date.now()}`); // always-fresh meta
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     meta = await r.json();
   } catch (e) {
@@ -96,6 +96,7 @@ async function main() {
       },
     });
     if (isMobile) layer.particleCount = 32768;
+    if (sessionStorage.getItem("lowmem")) layer.particleCount = 16384;
     try {
       map.addLayer(layer);
     } catch (e) {
@@ -105,6 +106,11 @@ async function main() {
   });
 
   map.on("error", (e) => console.warn("map error:", e?.error?.message ?? e));
+  map.getCanvas().addEventListener("webglcontextlost", () => {
+    fail("Graphics memory ran out — reloading with lighter settings…");
+    sessionStorage.setItem("lowmem", "1");
+    setTimeout(() => location.reload(), 1500);
+  });
 }
 
 main();
