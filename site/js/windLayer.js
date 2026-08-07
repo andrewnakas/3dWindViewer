@@ -114,7 +114,7 @@ export class WindLayer {
     this.exaggeration = opts.exaggeration ?? 1.5;
     // Height-above-terrain exaggeration (terrain base always follows the map's
     // own exaggeration so particles hug the rendered surface).
-    this.altScale = opts.altScale ?? 3;
+    this.altScale = opts.altScale ?? 2;
     this.opacity = 1.0;
     this.volumetric = opts.volumetric ?? true;
     this.levelIndices = this.volumetric

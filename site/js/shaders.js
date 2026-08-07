@@ -48,34 +48,6 @@ uniform vec2 u_tileScale;
 uniform vec2 u_clampMin;
 uniform vec2 u_clampMax;
 
-// Sampled wind at (pos, sigma): returns earth u, v (m/s), w (m/s), valid.
-vec4 sampleWind(vec2 pos, float sigma, out float heightM) {
-  float s = sigma * float(u_stackLen - 1);
-  int j = u_stackLen > 1 ? int(clamp(s, 0.0, float(u_stackLen - 2))) : 0;
-  int j1 = min(j + 1, u_stackLen - 1);
-  float f = u_stackLen > 1 ? clamp(s - float(j), 0.0, 1.0) : 0.0;
-  vec2 tl = clamp(pos, u_clampMin, u_clampMax) * u_tileScale;
-  vec4 a = mix(texture(u_frameA, u_tileOff[j] + tl), texture(u_frameB, u_tileOff[j] + tl), u_frameMix);
-  vec4 b = mix(texture(u_frameA, u_tileOff[j1] + tl), texture(u_frameB, u_tileOff[j1] + tl), u_frameMix);
-  vec3 wa = vec3(mix(u_uvScale[j].x, u_uvScale[j].y, a.r),
-                 mix(u_uvScale[j].z, u_uvScale[j].w, a.g),
-                 mix(u_wScale[j].x, u_wScale[j].y, a.b) * u_wFactor[j]);
-  vec3 wb = vec3(mix(u_uvScale[j1].x, u_uvScale[j1].y, b.r),
-                 mix(u_uvScale[j1].z, u_uvScale[j1].w, b.g),
-                 mix(u_wScale[j1].x, u_wScale[j1].y, b.b) * u_wFactor[j1]);
-  heightM = mix(u_height[j], u_height[j1], f);
-  // alpha blends toward the nearer level so particles pushed just above the
-  // terrain (lower level masked below-ground) survive on the upper level's data
-  return vec4(mix(wa, wb, f), mix(a.a, b.a, f));
-}
-
-float gapMeters(float sigma) {
-  if (u_stackLen < 2) return 1.0;
-  float s = sigma * float(u_stackLen - 1);
-  int j = int(clamp(s, 0.0, float(u_stackLen - 2)));
-  return max(u_height[j + 1] - u_height[j], 1.0);
-}
-
 uniform vec2 u_terrOff;    // atlas UV of the terrain tile
 uniform vec2 u_terrRange;  // hMin, hMax meters
 
@@ -85,17 +57,43 @@ float terrainHeight(vec2 pos) {
   return mix(u_terrRange.x, u_terrRange.y, (t.r * 255.0 * 256.0 + t.g * 255.0) / 65535.0);
 }
 
-// Lowest sigma whose level-stack height is >= h (piecewise-linear inverse).
-float sigmaOfHeight(float h) {
-  if (u_stackLen < 2 || h <= u_height[0]) return 0.0;
-  for (int j = 0; j < ${MAX_STACK - 1}; j++) {
-    if (j >= u_stackLen - 1) break;
-    if (u_height[j + 1] >= h) {
-      float f = clamp((h - u_height[j]) / max(u_height[j + 1] - u_height[j], 1.0), 0.0, 1.0);
-      return (float(j) + f) / float(u_stackLen - 1);
-    }
-  }
-  return 1.0;
+// Height of stack level j ABOVE the local terrain. Pressure levels sit at
+// their real altitude when above ground; where terrain rises past a level,
+// it collapses onto a thin near-surface floor, so the low stack conforms to
+// the ground everywhere (valleys AND ridges).
+float levelAgl(int j, float terr) {
+  return max(u_height[j] - terr, 10.0 + 60.0 * float(j));
+}
+
+// Sampled wind at (pos, sigma): returns earth u, v (m/s), w (m/s), valid.
+// heightM out = meters ASL, terrain-conforming per levelAgl.
+vec4 sampleWind(vec2 pos, float sigma, float terr, out float heightM) {
+  float s = sigma * float(u_stackLen - 1);
+  int j = u_stackLen > 1 ? int(clamp(s, 0.0, float(u_stackLen - 2))) : 0;
+  int j1 = min(j + 1, u_stackLen - 1);
+  float f = u_stackLen > 1 ? clamp(s - float(j), 0.0, 1.0) : 0.0;
+  vec2 tl = clamp(pos, u_clampMin, u_clampMax) * u_tileScale;
+  vec4 a = mix(texture(u_frameA, u_tileOff[j] + tl), texture(u_frameB, u_tileOff[j] + tl), u_frameMix);
+  vec4 b = mix(texture(u_frameA, u_tileOff[j1] + tl), texture(u_frameB, u_tileOff[j1] + tl), u_frameMix);
+  // if one adjacent level is below ground (masked), snap to the valid one
+  float fEff = f;
+  if (a.a < 0.5 && b.a >= 0.5) fEff = 1.0;
+  else if (b.a < 0.5 && a.a >= 0.5) fEff = 0.0;
+  vec3 wa = vec3(mix(u_uvScale[j].x, u_uvScale[j].y, a.r),
+                 mix(u_uvScale[j].z, u_uvScale[j].w, a.g),
+                 mix(u_wScale[j].x, u_wScale[j].y, a.b) * u_wFactor[j]);
+  vec3 wb = vec3(mix(u_uvScale[j1].x, u_uvScale[j1].y, b.r),
+                 mix(u_uvScale[j1].z, u_uvScale[j1].w, b.g),
+                 mix(u_wScale[j1].x, u_wScale[j1].y, b.b) * u_wFactor[j1]);
+  heightM = terr + mix(levelAgl(j, terr), levelAgl(j1, terr), fEff);
+  return vec4(mix(wa, wb, fEff), max(a.a, b.a));
+}
+
+float gapMeters(float sigma, float terr) {
+  if (u_stackLen < 2) return 1.0;
+  float s = sigma * float(u_stackLen - 1);
+  int j = int(clamp(s, 0.0, float(u_stackLen - 2)));
+  return max(levelAgl(j + 1, terr) - levelAgl(j, terr), 30.0);
 }
 `;
 
@@ -125,8 +123,9 @@ void main() {
   vec2 pos = statePos(sp);
   float sigma = sa.r;
 
+  float terr = terrainHeight(pos);
   float heightM;
-  vec4 wind = sampleWind(pos, sigma, heightM);
+  vec4 wind = sampleWind(pos, sigma, terr, heightM);
 
   float lat = u_north - pos.y * u_latSpan;
   float dlon = wind.x * u_dt / (111320.0 * max(cos(radians(lat)), 0.05));
@@ -134,15 +133,16 @@ void main() {
   vec2 npos = pos + vec2(dlon / u_lonSpan, -dlat / u_latSpan);
   float nsigma = sigma;
   if (u_stackLen > 1) {
-    nsigma = clamp(sigma + (wind.z * u_dt) / gapMeters(sigma) / float(u_stackLen - 1), 0.0, 1.0);
-    // terrain collision: flow is forced up and over rising ground
-    nsigma = max(nsigma, sigmaOfHeight(terrainHeight(npos) + 5.0));
+    nsigma = clamp(sigma + (wind.z * u_dt) / gapMeters(sigma, terr) / float(u_stackLen - 1), 0.0, 1.0);
   }
 
   bool oob = npos.x < 0.0 || npos.x > 1.0 || npos.y < 0.0 || npos.y > 1.0 || wind.a < 0.5;
   vec2 seed = v_uv + fract(u_time);
   vec2 spawnPos = u_spawnMin + vec2(rand(seed), rand(seed.yx * 1.71)) * (u_spawnMax - u_spawnMin);
-  float spawnSigma = rand(seed * 2.61);
+  // bias respawn toward the surface: most flow reads at ground level, the
+  // rest thins out with altitude
+  float sr = rand(seed * 2.61);
+  float spawnSigma = sr * sr;
 
 #ifdef FLOAT_STATE
   float age = sa.g * 255.0 + 1.0;
@@ -199,8 +199,9 @@ void main() {
   if (distance(pc, pp) > 0.02) pp = pc;
   vec2 pos = (end == 0) ? pc + (pp - pc) * u_streak : pc;
 
+  float terr = terrainHeight(pc);
   float heightM;
-  vec4 wind = sampleWind(pc, sigma, heightM);
+  vec4 wind = sampleWind(pc, sigma, terr, heightM);
   v_speed = clamp(length(wind.xy) / 60.0, 0.0, 1.0);
 
   float lon = u_west + pos.x * u_lonSpan;
@@ -211,7 +212,6 @@ void main() {
 
   // Terrain base rises with the map's own exaggeration so particles hug the
   // rendered surface; height above ground gets the (separate) altitude scale.
-  float terr = terrainHeight(pc);
   float z = terr * u_exagMerc + max(heightM - terr, 8.0) * u_altMerc;
   gl_Position = u_matrix * vec4(mx, my, z, 1.0);
 
