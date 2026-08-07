@@ -85,15 +85,17 @@ html, body {
 
 #error {
   position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(8, 10, 15, 0.92);
-  color: #ffb4b4;
-  font-size: 15px;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(560px, calc(100% - 32px));
+  background: rgba(80, 16, 20, 0.92);
+  border: 1px solid rgba(255, 120, 120, 0.4);
+  border-radius: 10px;
+  color: #ffc9c9;
+  font-size: 13px;
   text-align: center;
-  padding: 30px;
+  padding: 10px 16px;
   z-index: 20;
 }
 

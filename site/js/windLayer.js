@@ -1,14 +1,15 @@
 // MapLibre custom layer: GPU wind particles at pressure-level altitudes.
 
 import { QUAD_VERT, UPDATE_FRAG, DRAW_VERT, DRAW_FRAG } from "./shaders.js";
-import { rampTextureData, SPEED_MAX } from "./atmosphere.js";
+import { rampTextureData } from "./atmosphere.js";
 import { FrameManager } from "./frames.js";
 
-const MAX_AGE = 90; // frames
+const MAX_AGE = 90; // frames (float-state mode only)
 
-function compile(gl, vertSrc, fragSrc) {
+function compile(gl, vertSrc, fragSrc, defines = "") {
+  const inject = (src) => src.replace("#version 300 es", `#version 300 es\n${defines}`);
   const prog = gl.createProgram();
-  for (const [type, src] of [[gl.VERTEX_SHADER, vertSrc], [gl.FRAGMENT_SHADER, fragSrc]]) {
+  for (const [type, src] of [[gl.VERTEX_SHADER, inject(vertSrc)], [gl.FRAGMENT_SHADER, inject(fragSrc)]]) {
     const sh = gl.createShader(type);
     gl.shaderSource(sh, src);
     gl.compileShader(sh);
@@ -35,10 +36,11 @@ function uniforms(gl, prog) {
 }
 
 class ParticleSystem {
-  constructor(gl, level, size) {
+  constructor(gl, level, size, useFloat) {
     this.level = level; // meta level entry
     this.size = size;   // state texture is size x size
     this.gl = gl;
+    this.useFloat = useFloat;
     this.textures = [this.makeState(), this.makeState()];
     this.cur = 0;
     this.fbo = gl.createFramebuffer();
@@ -47,16 +49,27 @@ class ParticleSystem {
   makeState() {
     const gl = this.gl;
     const n = this.size;
-    const data = new Float32Array(n * n * 4);
-    for (let i = 0; i < n * n; i++) {
-      data[i * 4] = Math.random();
-      data[i * 4 + 1] = Math.random();
-      data[i * 4 + 2] = Math.random() * MAX_AGE; // stagger ages
-      data[i * 4 + 3] = 0;
-    }
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, n, n, 0, gl.RGBA, gl.FLOAT, data);
+    if (this.useFloat) {
+      const data = new Float32Array(n * n * 4);
+      for (let i = 0; i < n * n; i++) {
+        data[i * 4] = Math.random();
+        data[i * 4 + 1] = Math.random();
+        data[i * 4 + 2] = Math.random() * MAX_AGE; // stagger ages
+      }
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, n, n, 0, gl.RGBA, gl.FLOAT, data);
+    } else {
+      const data = new Uint8Array(n * n * 4);
+      for (let i = 0; i < n * n; i++) {
+        const x = Math.random(), y = Math.random();
+        data[i * 4] = Math.floor((x * 255 % 1) * 256);      // fine
+        data[i * 4 + 1] = Math.floor((y * 255 % 1) * 256);
+        data[i * 4 + 2] = Math.floor(x * 255);              // coarse
+        data[i * 4 + 3] = Math.floor(y * 255);
+      }
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, n, n, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    }
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -95,16 +108,18 @@ export class WindLayer {
   }
 
   onAdd(map, gl) {
-    if (!(gl instanceof WebGL2RenderingContext)) {
+    if (typeof WebGL2RenderingContext === "undefined" || !(gl instanceof WebGL2RenderingContext)) {
       throw new Error("WebGL2 required");
     }
-    if (!gl.getExtension("EXT_color_buffer_float")) {
-      throw new Error("EXT_color_buffer_float not supported on this GPU/browser");
-    }
+    // Prefer float state (adds per-particle age fade); fall back to the
+    // universally supported RGBA8 packed encoding (iOS Safari etc.).
+    this.useFloat = !!gl.getExtension("EXT_color_buffer_float")
+      && !new URLSearchParams(location.search).has("bytestate");
+    const defines = this.useFloat ? "#define FLOAT_STATE" : "";
     this.gl = gl;
-    this.updateProg = compile(gl, QUAD_VERT, UPDATE_FRAG);
+    this.updateProg = compile(gl, QUAD_VERT, UPDATE_FRAG, defines);
     this.updateU = uniforms(gl, this.updateProg);
-    this.drawProg = compile(gl, DRAW_VERT, DRAW_FRAG);
+    this.drawProg = compile(gl, DRAW_VERT, DRAW_FRAG, defines);
     this.drawU = uniforms(gl, this.drawProg);
     this.vao = gl.createVertexArray(); // attribute-less draws still need a VAO
 
@@ -140,9 +155,9 @@ export class WindLayer {
     if (!this.gl) return;
     for (const s of this.systems) s.destroy();
     const perLevel = Math.max(1, Math.round(this.particleCount / this.levelIndices.length));
-    const size = Math.max(16, 1 << Math.round(Math.log2(Math.sqrt(perLevel)) ));
+    const size = Math.max(16, 1 << Math.round(Math.log2(Math.sqrt(perLevel))));
     this.systems = this.levelIndices.map(
-      (i) => new ParticleSystem(this.gl, this.meta.levels[i], size)
+      (i) => new ParticleSystem(this.gl, this.meta.levels[i], size, this.useFloat)
     );
   }
 
@@ -160,6 +175,16 @@ export class WindLayer {
       clampMin: [hx, hy],
       clampMax: [1 - hx, 1 - hy],
     };
+  }
+
+  setTileUniforms(gl, U, sys) {
+    const t = this.tileUniforms(sys.level);
+    gl.uniform2fv(U.u_tileOffset, t.offset);
+    gl.uniform2fv(U.u_tileScale, t.scale);
+    gl.uniform2fv(U.u_clampMin, t.clampMin);
+    gl.uniform2fv(U.u_clampMax, t.clampMax);
+    gl.uniform2f(U.u_uRange, sys.level.uMin, sys.level.uMax);
+    gl.uniform2f(U.u_vRange, sys.level.vMin, sys.level.vMax);
   }
 
   render(gl, matrix) {
@@ -186,13 +211,11 @@ export class WindLayer {
     gl.uniform1i(U.u_frameA, 1);
     gl.uniform1i(U.u_frameB, 2);
     gl.uniform1f(U.u_frameMix, pair.mix);
-    gl.uniform1f(U.u_west, b.west);
     gl.uniform1f(U.u_north, b.north);
     gl.uniform1f(U.u_lonSpan, lonSpan);
     gl.uniform1f(U.u_latSpan, latSpan);
     gl.uniform1f(U.u_dt, 90.0 * this.speedFactor); // simulated s per frame
     gl.uniform1f(U.u_maxAge, MAX_AGE);
-    gl.uniform1f(U.u_speedMax, SPEED_MAX);
     gl.uniform1f(U.u_time, (performance.now() % 100000) / 1000);
 
     gl.activeTexture(gl.TEXTURE1);
@@ -201,14 +224,7 @@ export class WindLayer {
     gl.bindTexture(gl.TEXTURE_2D, pair.texB);
 
     for (const sys of this.systems) {
-      const t = this.tileUniforms(sys.level);
-      gl.uniform2fv(U.u_tileOffset, t.offset);
-      gl.uniform2fv(U.u_tileScale, t.scale);
-      gl.uniform2fv(U.u_clampMin, t.clampMin);
-      gl.uniform2fv(U.u_clampMax, t.clampMax);
-      gl.uniform2f(U.u_uRange, sys.level.uMin, sys.level.uMax);
-      gl.uniform2f(U.u_vRange, sys.level.vMin, sys.level.vMax);
-
+      this.setTileUniforms(gl, U, sys);
       gl.bindFramebuffer(gl.FRAMEBUFFER, sys.fbo);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, sys.prevTex, 0);
       gl.viewport(0, 0, sys.size, sys.size);
@@ -231,6 +247,9 @@ export class WindLayer {
     gl.uniform1i(D.u_stateCurr, 0);
     gl.uniform1i(D.u_statePrev, 1);
     gl.uniform1i(D.u_ramp, 2);
+    gl.uniform1i(D.u_frameA, 3);
+    gl.uniform1i(D.u_frameB, 4);
+    gl.uniform1f(D.u_frameMix, pair.mix);
     gl.uniform1f(D.u_west, b.west);
     gl.uniform1f(D.u_north, b.north);
     gl.uniform1f(D.u_lonSpan, lonSpan);
@@ -245,8 +264,13 @@ export class WindLayer {
 
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, this.rampTex);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, pair.texA);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, pair.texB);
 
     for (const sys of this.systems) {
+      this.setTileUniforms(gl, D, sys);
       gl.uniform1i(D.u_stateSize, sys.size);
       gl.uniform1f(D.u_alt, sys.level.heightMeters * m2merc * this.exaggeration);
       gl.activeTexture(gl.TEXTURE0);

@@ -61,7 +61,12 @@ export class FrameManager {
         if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
         return r.blob();
       })
-      .then((blob) => createImageBitmap(blob, { premultiplyAlpha: "none" }))
+      .then((blob) =>
+        // premultiplyAlpha option is unsupported on some Safari versions;
+        // premultiplication only affects alpha=0 (invalid) texels, so plain
+        // decode is an acceptable fallback.
+        createImageBitmap(blob, { premultiplyAlpha: "none" }).catch(() => createImageBitmap(blob))
+      )
       .then((bmp) => {
         this.textures.set(lead, this.upload(bmp));
         bmp.close();

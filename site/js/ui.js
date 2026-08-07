@@ -49,6 +49,7 @@ export function initUI(map, layer, meta) {
 
   // --- particle count ---
   const pc = $("particles-select");
+  pc.value = String(layer.particleCount);
   pc.addEventListener("change", () => layer.setParticleCount(Number(pc.value)));
 
   // --- terrain exaggeration ---

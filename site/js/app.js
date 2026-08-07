@@ -23,16 +23,23 @@ async function main() {
     throw e;
   }
 
-  const map = new maplibregl.Map({
-    container: "map",
-    style: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
-    center: [-98.5, 39.5],
-    zoom: 4,
-    pitch: 50,
-    bearing: 0,
-    maxPitch: 80,
-    antialias: true,
-  });
+  const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) || window.innerWidth < 700;
+  let map;
+  try {
+    map = new maplibregl.Map({
+      container: "map",
+      style: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+      center: [-98.5, 39.5],
+      zoom: isMobile ? 3 : 4,
+      pitch: 50,
+      bearing: 0,
+      maxPitch: 80,
+      antialias: !isMobile, // MSAA is heavy on mobile GPUs
+    });
+  } catch (e) {
+    fail(`Couldn't start the map (WebGL2 unavailable?): ${e.message}`);
+    throw e;
+  }
   map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
   window.__map = map; // debugging hook
 
@@ -64,6 +71,7 @@ async function main() {
       exaggeration: 1.5,
       onReady: () => initUI(map, layer, meta),
     });
+    if (isMobile) layer.particleCount = 16384;
     try {
       map.addLayer(layer);
     } catch (e) {
