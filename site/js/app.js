@@ -95,7 +95,7 @@ async function main() {
         new PointCast(map, layer, meta);
       },
     });
-    if (isMobile) layer.particleCount = 32768;
+    if (isMobile) layer.particleCount = 65536;
     if (sessionStorage.getItem("lowmem")) layer.particleCount = 16384;
     try {
       map.addLayer(layer);

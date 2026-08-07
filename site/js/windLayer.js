@@ -120,7 +120,7 @@ export class WindLayer {
     this.levelIndices = this.volumetric
       ? volumetricIndices(meta)
       : [meta.levels.findIndex((l) => l.id === "10m")];
-    this.particleCount = 65536;
+    this.particleCount = 262144;
     this.system = null;
     this.frames = null;
     this.onReady = opts.onReady;

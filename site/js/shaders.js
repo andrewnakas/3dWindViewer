@@ -140,9 +140,9 @@ void main() {
   vec2 seed = v_uv + fract(u_time);
   vec2 spawnPos = u_spawnMin + vec2(rand(seed), rand(seed.yx * 1.71)) * (u_spawnMax - u_spawnMin);
   // bias respawn toward the surface: most flow reads at ground level, the
-  // rest thins out with altitude
+  // rest thins out with altitude (half of all particles in the lowest levels)
   float sr = rand(seed * 2.61);
-  float spawnSigma = sr * sr;
+  float spawnSigma = sr * sr * sr;
 
 #ifdef FLOAT_STATE
   float age = sa.g * 255.0 + 1.0;
