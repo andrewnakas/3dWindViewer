@@ -31,7 +31,7 @@ async function main() {
       style: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
       center: [-98.5, 39.5],
       zoom: isMobile ? 3 : 4,
-      pitch: 50,
+      pitch: 55,
       bearing: 0,
       maxPitch: 80,
       antialias: !isMobile, // MSAA is heavy on mobile GPUs
@@ -71,7 +71,7 @@ async function main() {
       exaggeration: 1.5,
       onReady: () => initUI(map, layer, meta),
     });
-    if (isMobile) layer.particleCount = 16384;
+    if (isMobile) layer.particleCount = 32768; // ~3k per level in volumetric mode
     try {
       map.addLayer(layer);
     } catch (e) {

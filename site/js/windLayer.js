@@ -1,7 +1,7 @@
 // MapLibre custom layer: GPU wind particles at pressure-level altitudes.
 
 import { QUAD_VERT, UPDATE_FRAG, DRAW_VERT, DRAW_FRAG } from "./shaders.js";
-import { rampTextureData } from "./atmosphere.js";
+import { rampTextureData, volumetricIndices } from "./atmosphere.js";
 import { FrameManager } from "./frames.js";
 
 const MAX_AGE = 90; // frames (float-state mode only)
@@ -99,8 +99,15 @@ export class WindLayer {
     this.time = 0;              // forecast hour, continuous
     this.speedFactor = 1.0;
     this.exaggeration = opts.exaggeration ?? 1.5;
+    // Real atmospheric heights are invisible at continental scale (500 hPa is
+    // ~5.5 km over a ~5000 km view), so particle altitude gets its own
+    // exaggeration to make the level stack readable in 3D.
+    this.altScale = opts.altScale ?? 15;
     this.opacity = 1.0;
-    this.levelIndices = [meta.levels.findIndex((l) => l.id === "10m")];
+    this.volumetric = opts.volumetric ?? true;
+    this.levelIndices = this.volumetric
+      ? volumetricIndices(meta)
+      : [meta.levels.findIndex((l) => l.id === "10m")];
     this.particleCount = 65536;
     this.systems = [];
     this.frames = null;
@@ -272,7 +279,7 @@ export class WindLayer {
     for (const sys of this.systems) {
       this.setTileUniforms(gl, D, sys);
       gl.uniform1i(D.u_stateSize, sys.size);
-      gl.uniform1f(D.u_alt, sys.level.heightMeters * m2merc * this.exaggeration);
+      gl.uniform1f(D.u_alt, sys.level.heightMeters * m2merc * this.altScale);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, sys.curTex);
       gl.activeTexture(gl.TEXTURE1);

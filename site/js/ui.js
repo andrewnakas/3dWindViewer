@@ -1,9 +1,6 @@
 // DOM control wiring.
 
-import { levelName, drawLegend } from "./atmosphere.js";
-
-// Levels stacked in volumetric mode (by id), surface -> jet stream.
-const VOLUMETRIC_IDS = ["10m", "925", "850", "700", "500", "300", "250", "200"];
+import { levelName, drawLegend, volumetricIndices } from "./atmosphere.js";
 
 export function initUI(map, layer, meta) {
   const $ = (id) => document.getElementById(id);
@@ -29,23 +26,34 @@ export function initUI(map, layer, meta) {
     }
     sel.appendChild(og);
   }
-  sel.value = String(layer.levelIndices[0]);
+  sel.value = String(layer.volumetric
+    ? meta.levels.findIndex((l) => l.id === "10m")
+    : layer.levelIndices[0]);
   sel.addEventListener("change", () => layer.setLevels([Number(sel.value)]));
 
   // --- volumetric toggle ---
   const vol = $("volumetric");
+  vol.checked = layer.volumetric;
+  sel.disabled = vol.checked;
   vol.addEventListener("change", () => {
     sel.disabled = vol.checked;
-    if (vol.checked) {
-      const idx = VOLUMETRIC_IDS
-        .map((id) => meta.levels.find((l) => l.id === id))
-        .filter(Boolean)
-        .map((l) => l.index);
-      layer.setLevels(idx);
-    } else {
-      layer.setLevels([Number(sel.value)]);
-    }
+    layer.volumetric = vol.checked;
+    layer.setLevels(vol.checked ? volumetricIndices(meta) : [Number(sel.value)]);
   });
+
+  // --- wind altitude scale ---
+  const alt = $("alt-scale");
+  alt.value = String(layer.altScale);
+  $("alt-val").textContent = `${layer.altScale}×`;
+  alt.addEventListener("input", () => {
+    layer.altScale = Number(alt.value);
+    $("alt-val").textContent = `${alt.value}×`;
+  });
+
+  // --- panel collapse ---
+  const panel = document.getElementById("panel");
+  $("panel-toggle").addEventListener("click", () => panel.classList.toggle("collapsed"));
+  if (window.innerWidth < 700) panel.classList.add("collapsed");
 
   // --- particle count ---
   const pc = $("particles-select");

@@ -35,6 +35,16 @@ export function rampTextureData(n = 256) {
   return data;
 }
 
+// Levels stacked in volumetric mode (by id), surface -> jet stream.
+export const VOLUMETRIC_IDS = ["10m", "925", "850", "700", "600", "500", "400", "300", "250", "200"];
+
+export function volumetricIndices(meta) {
+  return VOLUMETRIC_IDS
+    .map((id) => meta.levels.find((l) => l.id === id))
+    .filter(Boolean)
+    .map((l) => l.index);
+}
+
 export function levelName(level) {
   if (level.kind === "height_agl") return `${level.value} m (surface)`;
   const km = (level.heightMeters / 1000).toFixed(1);
