@@ -2,8 +2,11 @@
 
 import { WindLayer } from "./windLayer.js";
 import { initUI } from "./ui.js";
+import { PointCast } from "./pointcast.js";
 
 const TERRAIN_TILES = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png";
+const IMAGERY_TILES = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
+const LABEL_TILES = "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}";
 
 function fail(msg) {
   const el = document.getElementById("error");
@@ -28,11 +31,33 @@ async function main() {
   try {
     map = new maplibregl.Map({
       container: "map",
-      style: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
-      center: [-98.5, 39.5],
-      zoom: isMobile ? 3 : 4,
-      pitch: 55,
-      bearing: 0,
+      style: {
+        version: 8,
+        sources: {
+          imagery: {
+            type: "raster",
+            tiles: [IMAGERY_TILES],
+            tileSize: 256,
+            maxzoom: 18,
+            attribution: "Imagery © Esri, Maxar, Earthstar Geographics",
+          },
+          labels: {
+            type: "raster",
+            tiles: [LABEL_TILES],
+            tileSize: 256,
+            maxzoom: 18,
+          },
+        },
+        layers: [
+          { id: "bg", type: "background", paint: { "background-color": "#0b0e14" } },
+          { id: "imagery", type: "raster", source: "imagery" },
+          { id: "labels", type: "raster", source: "labels", paint: { "raster-opacity": 0.85 } },
+        ],
+      },
+      center: [-111.04, 45.68], // Bozeman, MT
+      zoom: isMobile ? 8.8 : 9.6,
+      pitch: 65,
+      bearing: -15,
       maxPitch: 80,
       antialias: !isMobile, // MSAA is heavy on mobile GPUs
     });
@@ -41,6 +66,15 @@ async function main() {
     throw e;
   }
   map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
+  map.addControl(
+    new maplibregl.GeolocateControl({
+      positionOptions: { enableHighAccuracy: true },
+      trackUserLocation: true,
+      showUserLocation: true,
+      fitBoundsOptions: { maxZoom: 10, pitch: 65 },
+    }),
+    "top-right"
+  );
   window.__map = map; // debugging hook
 
   map.on("load", () => {
@@ -52,50 +86,21 @@ async function main() {
       encoding: "terrarium",
       attribution: "Terrain: AWS Terrain Tiles / Mapzen",
     });
-    map.addSource("hillshade-dem", {
-      type: "raster-dem",
-      tiles: [TERRAIN_TILES],
-      tileSize: 256,
-      maxzoom: 12,
-      encoding: "terrarium",
-    });
-    map.addLayer({
-      id: "hillshade",
-      type: "hillshade",
-      source: "hillshade-dem",
-      paint: { "hillshade-exaggeration": 0.35 },
-    });
     map.setTerrain({ source: "terrain-dem", exaggeration: 1.5 });
 
     const layer = new WindLayer(map, meta, {
       exaggeration: 1.5,
-      onReady: () => initUI(map, layer, meta),
+      onReady: () => {
+        initUI(map, layer, meta);
+        new PointCast(map, layer, meta);
+      },
     });
-    if (isMobile) layer.particleCount = 32768; // ~3k per level in volumetric mode
+    if (isMobile) layer.particleCount = 32768;
     try {
       map.addLayer(layer);
     } catch (e) {
       fail(`This browser can't run the wind layer: ${e.message}`);
       throw e;
-    }
-
-    // ?debug: overlay frame 0 atlas tile georeference check
-    if (new URLSearchParams(location.search).has("debug")) {
-      const b = meta.bounds;
-      map.addSource("debug-atlas", {
-        type: "image",
-        url: `data/${meta.frames[0].file}`,
-        coordinates: [
-          [b.west, b.north], [b.east, b.north],
-          [b.east, b.south], [b.west, b.south],
-        ],
-      });
-      map.addLayer({
-        id: "debug-atlas",
-        type: "raster",
-        source: "debug-atlas",
-        paint: { "raster-opacity": 0.55 },
-      });
     }
   });
 

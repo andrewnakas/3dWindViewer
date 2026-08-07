@@ -112,9 +112,9 @@ export class WindLayer {
     this.time = 0;              // forecast hour, continuous
     this.speedFactor = 1.0;
     this.exaggeration = opts.exaggeration ?? 1.5;
-    // Real atmospheric heights are invisible at continental scale, so particle
-    // altitude gets its own exaggeration to make the stack readable in 3D.
-    this.altScale = opts.altScale ?? 15;
+    // Height-above-terrain exaggeration (terrain base always follows the map's
+    // own exaggeration so particles hug the rendered surface).
+    this.altScale = opts.altScale ?? 3;
     this.opacity = 1.0;
     this.volumetric = opts.volumetric ?? true;
     this.levelIndices = this.volumetric
@@ -198,11 +198,14 @@ export class WindLayer {
     }
     const hx = 0.5 / (this.meta.tile.width * cols) * cols;
     const hy = 0.5 / (this.meta.tile.height * rows) * rows;
+    const t = this.meta.terrain;
     return {
       len: L, tileOff, uvScale, wScale, wFactor, height,
       tileScale: [1 / cols, 1 / rows],
       clampMin: [hx, hy],
       clampMax: [1 - hx, 1 - hy],
+      terrOff: t ? [(t.index % cols) / cols, Math.floor(t.index / cols) / rows] : [0, 0],
+      terrRange: t ? [t.hMin, t.hMax] : [0, 0],
     };
   }
 
@@ -217,6 +220,28 @@ export class WindLayer {
     gl.uniform2fv(U.u_tileScale, s.tileScale);
     gl.uniform2fv(U.u_clampMin, s.clampMin);
     gl.uniform2fv(U.u_clampMax, s.clampMax);
+    gl.uniform2fv(U.u_terrOff, s.terrOff);
+    gl.uniform2fv(U.u_terrRange, s.terrRange);
+  }
+
+  // Respawn region follows the viewport (padded), so zoomed-in views stay
+  // densely seeded instead of spreading 65k particles across all of CONUS.
+  spawnBounds() {
+    const b = this.meta.bounds;
+    const lonSpan = b.east - b.west;
+    const latSpan = b.north - b.south;
+    try {
+      const mb = this.map.getBounds();
+      let x0 = (mb.getWest() - b.west) / lonSpan;
+      let x1 = (mb.getEast() - b.west) / lonSpan;
+      let y0 = (b.north - mb.getNorth()) / latSpan;
+      let y1 = (b.north - mb.getSouth()) / latSpan;
+      const padX = (x1 - x0) * 0.15, padY = (y1 - y0) * 0.15;
+      x0 = Math.max(0, x0 - padX); x1 = Math.min(1, x1 + padX);
+      y0 = Math.max(0, y0 - padY); y1 = Math.min(1, y1 + padY);
+      if (x1 - x0 > 0.01 && y1 - y0 > 0.01) return { min: [x0, y0], max: [x1, y1] };
+    } catch { /* fall through */ }
+    return { min: [0, 0], max: [1, 1] };
   }
 
   render(gl, matrix) {
@@ -249,9 +274,15 @@ export class WindLayer {
     gl.uniform1f(U.u_north, b.north);
     gl.uniform1f(U.u_lonSpan, lonSpan);
     gl.uniform1f(U.u_latSpan, latSpan);
-    gl.uniform1f(U.u_dt, 90.0 * this.speedFactor);
+    // simulated seconds per frame, scaled down when zoomed in so motion stays
+    // smooth (constant-ish screen-space speed)
+    const zoomFactor = Math.min(1, Math.pow(1.6, 4 - this.map.getZoom()));
+    gl.uniform1f(U.u_dt, 90.0 * this.speedFactor * Math.max(zoomFactor, 0.03));
     gl.uniform1f(U.u_maxAge, MAX_AGE);
     gl.uniform1f(U.u_time, (performance.now() % 100000) / 1000);
+    const spawn = this.spawnBounds();
+    gl.uniform2fv(U.u_spawnMin, spawn.min);
+    gl.uniform2fv(U.u_spawnMax, spawn.max);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, sys.curState.pos);
@@ -293,13 +324,15 @@ export class WindLayer {
     gl.uniform1f(D.u_lonSpan, lonSpan);
     gl.uniform1f(D.u_latSpan, latSpan);
     gl.uniform1f(D.u_altMerc, m2merc * this.altScale);
+    gl.uniform1f(D.u_exagMerc, m2merc * this.exaggeration);
     gl.uniform1f(D.u_streak, 4.0);
     gl.uniform1f(D.u_maxAge, MAX_AGE);
     gl.uniform1f(D.u_opacity, this.opacity);
     gl.uniform1i(D.u_stateSize, sys.size);
 
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE); // additive glow on dark basemap
+    // premultiplied over-blending: readable on bright satellite imagery
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.disable(gl.DEPTH_TEST);
 
     gl.activeTexture(gl.TEXTURE0);

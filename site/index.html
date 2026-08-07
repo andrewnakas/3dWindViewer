@@ -24,8 +24,8 @@
     <label for="level-select">Single level</label>
     <select id="level-select" disabled></select>
 
-    <label for="alt-scale">Wind altitude scale <span id="alt-val">15×</span></label>
-    <input type="range" id="alt-scale" min="1" max="30" step="1" value="15">
+    <label for="alt-scale">Wind altitude scale <span id="alt-val">3×</span></label>
+    <input type="range" id="alt-scale" min="1" max="30" step="1" value="3">
 
     <label for="particles-select">Particles</label>
     <select id="particles-select">
@@ -47,6 +47,15 @@
       Data: <a href="https://dynamical.org/catalog/noaa-hrrr-forecast-48-hour-virtual/" target="_blank">NOAA HRRR via dynamical.org</a><br>
       Terrain: AWS Terrain Tiles · Map: © <a href="https://carto.com/attributions" target="_blank">CARTO</a>, © OpenStreetMap
     </div>
+  </div>
+
+  <div id="pointcast" hidden>
+    <div id="pointcast-head">
+      <span id="pointcast-title">Wind profile</span>
+      <button id="pointcast-close" title="Close">✕</button>
+    </div>
+    <canvas id="pointcast-canvas"></canvas>
+    <div id="pointcast-tip"></div>
   </div>
 
   <div id="timebar">

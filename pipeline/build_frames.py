@@ -108,6 +108,10 @@ def main():
 
     index_map = build_index_map(prs.x.values, prs.y.values)
     heights = read_heights(prs, init)
+    terrain = regrid(
+        sfc.sel(init_time=init).isel(lead_time=0).geopotential_height_surface.values,
+        index_map,
+    )
 
     frames_by_lead = {}
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
@@ -118,7 +122,7 @@ def main():
             log.info("lead %02d done (%d/%d)", lead, len(frames_by_lead), len(leads))
 
     scales = compute_scales([f for f, _ in frames_by_lead.values()])
-    meta = write_output(args.out, frames_by_lead, scales, init_iso, heights)
+    meta = write_output(args.out, frames_by_lead, scales, init_iso, heights, terrain)
 
     log.info(
         "wrote %d frames to %s in %.1f min (init %s)",

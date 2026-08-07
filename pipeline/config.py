@@ -27,7 +27,8 @@ WEST, EAST = -134.1, -60.9
 SOUTH, NORTH = 21.1, 52.7
 TILE_W, TILE_H = 450, 265  # lon x lat samples per level tile (~12 km effective)
 
-ATLAS_COLS, ATLAS_ROWS = 7, 6  # 42 slots for 41 levels
+ATLAS_COLS, ATLAS_ROWS = 7, 6  # 42 slots: 41 levels + terrain tile
+TERRAIN_TILE_INDEX = 41  # surface elevation, 16-bit packed in R/G
 ATLAS_W = ATLAS_COLS * TILE_W   # 3150
 ATLAS_H = ATLAS_ROWS * TILE_H   # 1590
 assert len(LEVELS) <= ATLAS_COLS * ATLAS_ROWS

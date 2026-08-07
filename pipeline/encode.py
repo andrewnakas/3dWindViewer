@@ -24,6 +24,7 @@ from config import (
     NORTH,
     SCALE_PAD,
     SOUTH,
+    TERRAIN_TILE_INDEX,
     TILE_H,
     TILE_W,
     WEST,
@@ -58,9 +59,26 @@ def compute_scales(frames):
     return scales
 
 
-def encode_frame(frame, valid, scales):
+def encode_terrain_tile(atlas, terrain, t_range):
+    """Pack surface elevation (m) 16-bit into R (hi) / G (lo) of the spare tile.
+    Linear decode (r*255*256 + g*255)/65535 commutes with bilinear filtering."""
+    i = TERRAIN_TILE_INDEX
+    r0 = (i // ATLAS_COLS) * TILE_H
+    c0 = (i % ATLAS_COLS) * TILE_W
+    lo_m, hi_m = t_range
+    ok = ~np.isnan(terrain)
+    v = np.round(np.clip((np.nan_to_num(terrain) - lo_m) / (hi_m - lo_m), 0, 1) * 65535).astype(np.uint32)
+    tile = atlas[r0 : r0 + TILE_H, c0 : c0 + TILE_W]
+    tile[:, :, 0] = np.where(ok, v >> 8, 0).astype(np.uint8)
+    tile[:, :, 1] = np.where(ok, v & 0xFF, 0).astype(np.uint8)
+    tile[:, :, 3] = np.where(ok, 255, 0).astype(np.uint8)
+
+
+def encode_frame(frame, valid, scales, terrain=None, t_range=None):
     """frame: (nlev, TILE_H, TILE_W, 3); valid: (nlev, TILE_H, TILE_W) bool."""
     atlas = np.zeros((ATLAS_H, ATLAS_W, 4), dtype=np.uint8)
+    if terrain is not None:
+        encode_terrain_tile(atlas, terrain, t_range)
     for i in range(frame.shape[0]):
         r0 = (i // ATLAS_COLS) * TILE_H
         c0 = (i % ATLAS_COLS) * TILE_W
@@ -76,15 +94,20 @@ def encode_frame(frame, valid, scales):
     return atlas
 
 
-def write_output(out_dir, frames_by_lead, scales, init_time_iso, heights):
-    """frames_by_lead: {lead: (frame, valid)}; heights: per-level meters ASL."""
+def write_output(out_dir, frames_by_lead, scales, init_time_iso, heights, terrain):
+    """frames_by_lead: {lead: (frame, valid)}; heights: per-level meters ASL;
+    terrain: (TILE_H, TILE_W) surface elevation in meters."""
     out = Path(out_dir)
     (out / "frames").mkdir(parents=True, exist_ok=True)
 
+    t_range = (
+        float(np.floor(np.nanmin(terrain) / 10) * 10 - 10),
+        float(np.ceil(np.nanmax(terrain) / 10) * 10 + 10),
+    )
     frame_entries = []
     for lead, (frame, valid) in sorted(frames_by_lead.items()):
         name = f"frames/f{lead:02d}.png"
-        atlas = encode_frame(frame, valid, scales)
+        atlas = encode_frame(frame, valid, scales, terrain, t_range)
         Image.fromarray(atlas, "RGBA").save(out / name, optimize=True)
         frame_entries.append({"lead_hours": lead, "file": name})
 
@@ -94,6 +117,7 @@ def write_output(out_dir, frames_by_lead, scales, init_time_iso, heights):
         "bounds": {"west": WEST, "south": SOUTH, "east": EAST, "north": NORTH},
         "tile": {"width": TILE_W, "height": TILE_H},
         "atlas": {"cols": ATLAS_COLS, "rows": ATLAS_ROWS},
+        "terrain": {"index": TERRAIN_TILE_INDEX, "hMin": t_range[0], "hMax": t_range[1]},
         "frames": frame_entries,
         "levels": [
             {

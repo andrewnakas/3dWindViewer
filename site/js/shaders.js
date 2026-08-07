@@ -64,8 +64,9 @@ vec4 sampleWind(vec2 pos, float sigma, out float heightM) {
                  mix(u_uvScale[j1].z, u_uvScale[j1].w, b.g),
                  mix(u_wScale[j1].x, u_wScale[j1].y, b.b) * u_wFactor[j1]);
   heightM = mix(u_height[j], u_height[j1], f);
-  // below-ground levels have alpha 0; blend so particles near masked layers die
-  return vec4(mix(wa, wb, f), min(a.a, b.a));
+  // alpha blends toward the nearer level so particles pushed just above the
+  // terrain (lower level masked below-ground) survive on the upper level's data
+  return vec4(mix(wa, wb, f), mix(a.a, b.a, f));
 }
 
 float gapMeters(float sigma) {
@@ -73,6 +74,28 @@ float gapMeters(float sigma) {
   float s = sigma * float(u_stackLen - 1);
   int j = int(clamp(s, 0.0, float(u_stackLen - 2)));
   return max(u_height[j + 1] - u_height[j], 1.0);
+}
+
+uniform vec2 u_terrOff;    // atlas UV of the terrain tile
+uniform vec2 u_terrRange;  // hMin, hMax meters
+
+float terrainHeight(vec2 pos) {
+  vec2 uv = u_terrOff + clamp(pos, u_clampMin, u_clampMax) * u_tileScale;
+  vec4 t = texture(u_frameA, uv);  // terrain tile is identical in every frame
+  return mix(u_terrRange.x, u_terrRange.y, (t.r * 255.0 * 256.0 + t.g * 255.0) / 65535.0);
+}
+
+// Lowest sigma whose level-stack height is >= h (piecewise-linear inverse).
+float sigmaOfHeight(float h) {
+  if (u_stackLen < 2 || h <= u_height[0]) return 0.0;
+  for (int j = 0; j < ${MAX_STACK - 1}; j++) {
+    if (j >= u_stackLen - 1) break;
+    if (u_height[j + 1] >= h) {
+      float f = clamp((h - u_height[j]) / max(u_height[j + 1] - u_height[j], 1.0), 0.0, 1.0);
+      return (float(j) + f) / float(u_stackLen - 1);
+    }
+  }
+  return 1.0;
 }
 `;
 
@@ -91,6 +114,8 @@ uniform float u_latSpan;
 uniform float u_dt;
 uniform float u_maxAge;
 uniform float u_time;
+uniform vec2 u_spawnMin;   // respawn region (normalized), follows the viewport
+uniform vec2 u_spawnMax;
 
 ${COMMON}
 
@@ -110,11 +135,13 @@ void main() {
   float nsigma = sigma;
   if (u_stackLen > 1) {
     nsigma = clamp(sigma + (wind.z * u_dt) / gapMeters(sigma) / float(u_stackLen - 1), 0.0, 1.0);
+    // terrain collision: flow is forced up and over rising ground
+    nsigma = max(nsigma, sigmaOfHeight(terrainHeight(npos) + 5.0));
   }
 
   bool oob = npos.x < 0.0 || npos.x > 1.0 || npos.y < 0.0 || npos.y > 1.0 || wind.a < 0.5;
   vec2 seed = v_uv + fract(u_time);
-  vec2 spawnPos = vec2(rand(seed), rand(seed.yx * 1.71));
+  vec2 spawnPos = u_spawnMin + vec2(rand(seed), rand(seed.yx * 1.71)) * (u_spawnMax - u_spawnMin);
   float spawnSigma = rand(seed * 2.61);
 
 #ifdef FLOAT_STATE
@@ -146,7 +173,8 @@ uniform float u_west;
 uniform float u_north;
 uniform float u_lonSpan;
 uniform float u_latSpan;
-uniform float u_altMerc;   // mercator z units per meter, incl. altitude scale
+uniform float u_altMerc;   // mercator z per meter of height-above-terrain (altitude scale)
+uniform float u_exagMerc;  // mercator z per meter of terrain (matches map terrain exaggeration)
 uniform float u_streak;
 uniform float u_maxAge;
 
@@ -181,7 +209,11 @@ void main() {
   float sm = clamp(sin(radians(lat)), -0.9999, 0.9999);
   float my = 0.5 - 0.25 * log((1.0 + sm) / (1.0 - sm)) / PI;
 
-  gl_Position = u_matrix * vec4(mx, my, heightM * u_altMerc, 1.0);
+  // Terrain base rises with the map's own exaggeration so particles hug the
+  // rendered surface; height above ground gets the (separate) altitude scale.
+  float terr = terrainHeight(pc);
+  float z = terr * u_exagMerc + max(heightM - terr, 8.0) * u_altMerc;
+  gl_Position = u_matrix * vec4(mx, my, z, 1.0);
 
   float endDim = (end == 0) ? 0.1 : 1.0;
 #ifdef FLOAT_STATE

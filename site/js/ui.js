@@ -92,6 +92,7 @@ export function initUI(map, layer, meta) {
     const valid = new Date(init.getTime() + layer.time * 3600e3);
     const opts = { month: "short", day: "numeric", hour: "numeric" };
     label.textContent = `+${Math.round(layer.time)} h · ${valid.toLocaleString(undefined, opts)}`;
+    window.dispatchEvent(new CustomEvent("windtime", { detail: layer.time }));
   }
 
   slider.addEventListener("input", () => {
