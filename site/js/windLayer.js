@@ -334,13 +334,18 @@ export class WindLayer {
       ]);
       const cx = (cam.lng - b.west) / lonSpan;
       const cy = (b.north - cam.lat) / latSpan;
-      // Width of the view at the bottom of the screen ~ the near-field scale.
-      const near = this.map.unproject([0, this.map.getCanvas().clientHeight]);
-      const nearR = this.map.unproject([
-        this.map.getCanvas().clientWidth,
-        this.map.getCanvas().clientHeight,
-      ]);
-      const reach = Math.max(Math.abs(nearR.lng - near.lng) / lonSpan, 0.0005) * 1.6;
+      // Size the box from the ground the camera actually sees. Measuring only
+      // the screen's width collapses it on a tall phone viewport, where the
+      // view is narrow across but reaches far up-screen — that left the near
+      // terrain unseeded on mobile while desktop looked fine.
+      const W = this.map.getCanvas().clientWidth;
+      const H = this.map.getCanvas().clientHeight;
+      const bl = this.map.unproject([0, H]);
+      const br = this.map.unproject([W, H]);
+      const midY = this.map.unproject([W / 2, H * 0.45]);
+      const acrossDeg = Math.abs(br.lng - bl.lng) / lonSpan;
+      const upDeg = Math.abs(midY.lat - cam.lat) / latSpan;
+      const reach = Math.max(acrossDeg, upDeg, 0.0005) * 1.6;
       x0 = Math.max(x0, cx - reach); x1 = Math.min(x1, cx + reach);
       y0 = Math.max(y0, cy - reach); y1 = Math.min(y1, cy + reach);
       if (!(x1 > x0 && y1 > y0)) {
@@ -402,6 +407,21 @@ export class WindLayer {
     const spawn = this.spawnBounds();
     gl.uniform2fv(U.u_spawnMin, spawn.min);
     gl.uniform2fv(U.u_spawnMax, spawn.max);
+
+    // Ground point a little way in front of the camera, and how hard to pull
+    // respawns toward it. The steeper the pitch the more the far field
+    // dominates the frame, so the stronger the pull needs to be.
+    let camUp = [(spawn.min[0] + spawn.max[0]) / 2, (spawn.min[1] + spawn.max[1]) / 2];
+    let bias = 0;
+    try {
+      const cw = this.map.getCanvas().clientWidth;
+      const ch = this.map.getCanvas().clientHeight;
+      const fg = this.map.unproject([cw / 2, ch * 0.88]);
+      camUp = [(fg.lng - b.west) / lonSpan, (b.north - fg.lat) / latSpan];
+      bias = Math.min(0.97, Math.max(0, (this.map.getPitch() - 25) / 60));
+    } catch { bias = 0; }
+    gl.uniform2fv(U.u_camPosUp, camUp);
+    gl.uniform1f(U.u_spawnBias, bias);
 
     const tp = this.tuning;
     const hiRes = !!this.frames?.terrainTex;
@@ -506,13 +526,23 @@ export class WindLayer {
     gl.uniform1f(D.u_camAlt, camAlt);
     gl.uniform1f(D.u_occlude, this.depthOcclusion && camAlt > 0 ? 1.0 : 0.0);
     // Fade out roughly beyond the near half of the view, so the frame is about
-    // the terrain in front of you rather than the horizon.
-    const viewKm = Math.max(
-      (this.map.getBounds().getEast() - this.map.getBounds().getWest())
-        * 111 * Math.cos((center.lat * Math.PI) / 180), 5
-    );
-    gl.uniform1f(D.u_fadeNear, viewKm * 0.35);
-    gl.uniform1f(D.u_fadeFar, viewKm * 0.9);
+    // the terrain in front of you rather than the horizon. Measure how far the
+    // camera actually sees UP the screen, not the east-west span: on a tall
+    // phone viewport the latter is small while the ground reaches much
+    // further, and using it faded the whole foreground away.
+    let viewKm = 40;
+    try {
+      const cw = this.map.getCanvas().clientWidth;
+      const ch = this.map.getCanvas().clientHeight;
+      const nearPt = this.map.unproject([cw / 2, ch]);
+      const midPt = this.map.unproject([cw / 2, ch * 0.35]);
+      const dLatKm = Math.abs(midPt.lat - nearPt.lat) * 110.54;
+      const dLonKm = Math.abs(midPt.lng - nearPt.lng) * 111.32
+        * Math.cos((center.lat * Math.PI) / 180);
+      viewKm = Math.max(Math.hypot(dLatKm, dLonKm), 8);
+    } catch { /* keep the default */ }
+    gl.uniform1f(D.u_fadeNear, viewKm * 1.2);
+    gl.uniform1f(D.u_fadeFar, viewKm * 3.0);
 
     gl.enable(gl.BLEND);
     // premultiplied over-blending: readable on bright satellite imagery
