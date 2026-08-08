@@ -401,6 +401,11 @@ uniform float u_altMerc;   // mercator z per meter of height-above-terrain (alti
 uniform float u_exagMerc;  // mercator z per meter of terrain (matches map terrain exaggeration)
 uniform float u_streak;
 uniform float u_maxAge;
+uniform vec2 u_camPos;    // camera ground position, normalized domain coords
+uniform float u_camAlt;   // camera altitude, metres ASL
+uniform float u_occlude;  // enable distance fade
+uniform float u_fadeNear; // km at which particles start thinning
+uniform float u_fadeFar;  // km at which they are gone
 
 out float v_speed;
 out float v_alpha;
@@ -442,7 +447,21 @@ void main() {
   float z = terr * u_exagMerc + max(heightM - terr, 0.0) * u_altMerc;
   gl_Position = u_matrix * vec4(mx, my, z, 1.0);
 
+  // Fade out with distance from the camera. At a near-horizontal view the
+  // horizon is hundreds of km away, and far particles — which are legitimately
+  // high air — pile into the few rows of pixels above the skyline and read as
+  // a slab of haze detached from the terrain. Thinning them with range keeps
+  // the frame about the ground you are actually looking at.
+  float rangeFade = 1.0;
+  if (u_occlude > 0.5) {
+    float dLon = (pc.x - u_camPos.x) * u_lonSpan * 111320.0 * cos(radians(lat));
+    float dLat = (pc.y - u_camPos.y) * u_latSpan * 110540.0;
+    float km = sqrt(dLon * dLon + dLat * dLat) / 1000.0;
+    rangeFade = 1.0 - smoothstep(u_fadeNear, u_fadeFar, km);
+  }
+
   float endDim = (end == 0) ? 0.2 : 1.0;
+  endDim *= rangeFade;
 #ifdef FLOAT_STATE
   float age = aux.g * 255.0;
   float fadeIn = clamp(age / 10.0, 0.0, 1.0);

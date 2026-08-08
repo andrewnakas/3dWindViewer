@@ -458,22 +458,46 @@ export class WindLayer {
     gl.uniform1i(D.u_stateSize, sys.size);
     this.setTerrainUniforms(gl, D, 7);
 
+    // Camera ground position + altitude, for the terrain occlusion raymarch.
+    // getFreeCameraOptions is not in every MapLibre build, so derive it from
+    // the transform: the eye sits behind the map centre along the bearing, at
+    // a distance set by pitch and the metres-per-pixel scale.
+    let camX = 0.5, camY = 0.5, camAlt = 0;
+    try {
+      const pitch = (this.map.getPitch() * Math.PI) / 180;
+      const bearing = (this.map.getBearing() * Math.PI) / 180;
+      // metres per pixel at this zoom/latitude, times half the viewport height
+      const mpp = 156543.03392 * Math.cos((center.lat * Math.PI) / 180)
+        / Math.pow(2, this.map.getZoom());
+      const halfH = this.map.getCanvas().clientHeight / 2;
+      const eyeDist = mpp * halfH / Math.max(Math.tan(this.map.transform.fovX ?? 0.6), 0.2);
+      camAlt = Math.cos(pitch) * eyeDist;
+      const back = Math.sin(pitch) * eyeDist;         // ground offset behind centre
+      const dLat = (back * Math.cos(bearing + Math.PI)) / 110540;
+      const dLon = (back * Math.sin(bearing + Math.PI))
+        / (111320 * Math.max(Math.cos((center.lat * Math.PI) / 180), 0.05));
+      camX = (center.lng + dLon - b.west) / lonSpan;
+      camY = (b.north - (center.lat + dLat)) / latSpan;
+    } catch { camAlt = 0; }
+    gl.uniform2f(D.u_camPos, camX, camY);
+    gl.uniform1f(D.u_camAlt, camAlt);
+    gl.uniform1f(D.u_occlude, this.depthOcclusion && camAlt > 0 ? 1.0 : 0.0);
+    // Fade out roughly beyond the near half of the view, so the frame is about
+    // the terrain in front of you rather than the horizon.
+    const viewKm = Math.max(
+      (this.map.getBounds().getEast() - this.map.getBounds().getWest())
+        * 111 * Math.cos((center.lat * Math.PI) / 180), 5
+    );
+    gl.uniform1f(D.u_fadeNear, viewKm * 0.35);
+    gl.uniform1f(D.u_fadeFar, viewKm * 0.9);
+
     gl.enable(gl.BLEND);
     // premultiplied over-blending: readable on bright satellite imagery
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-    // Depth-test against the terrain MapLibre has already drawn, so a ridge
-    // hides the air behind it. Without this, wind from kilometres beyond the
-    // skyline paints over the mountains and reads as a slab hanging in the
-    // sky — the flow looked detached from the terrain no matter how well the
-    // physics placed it. Depth writes stay off: the particles are translucent
-    // and must not occlude each other.
-    if (this.depthOcclusion) {
-      gl.enable(gl.DEPTH_TEST);
-      gl.depthFunc(gl.LEQUAL);
-      gl.depthMask(false);
-    } else {
-      gl.disable(gl.DEPTH_TEST);
-    }
+    // MapLibre's terrain depth is not in this framebuffer, so the GPU depth
+    // test cannot hide air behind a ridge — the draw shader raymarches the
+    // terrain texture instead (see u_occlude).
+    gl.disable(gl.DEPTH_TEST);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, sys.curState.pos);

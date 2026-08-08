@@ -1,6 +1,9 @@
 // DOM control wiring.
 
-import { levelName, drawLegend, volumetricIndices, fullColumnIndices } from "./atmosphere.js";
+import {
+  levelName, drawLegend, volumetricIndices, fullColumnIndices,
+  AGL_LADDER, AGL_LADDER_FULL,
+} from "./atmosphere.js";
 
 export function initUI(map, layer, meta) {
   const $ = (id) => document.getElementById(id);
@@ -46,6 +49,7 @@ export function initUI(map, layer, meta) {
   });
   full.addEventListener("change", () => {
     layer.fullColumn = full.checked;
+    layer.aglLadder = full.checked ? AGL_LADDER_FULL : AGL_LADDER;
     if (vol.checked) layer.setLevels(stackIndices());
   });
 

@@ -53,7 +53,12 @@ export const TERRAIN_IDS = ["10m", "80m", "925", "900", "850", "800", "750", "70
 // The result is a 10 m wind that is 10 m off the deck everywhere, a 150 m wind
 // at 150 m, and so on, rather than surfaces that drift relative to the ground.
 // Spacing is tight low down, where terrain shapes the flow most.
-export const AGL_LADDER = [10, 80, 150, 300, 600, 1000, 1500, 2200, 3200, 4500];
+// Capped at 2 km: this is the layer terrain actually shapes, and it keeps the
+// wind visually attached to the ground. Higher air is real but, seen from a
+// near-horizontal view where the horizon is hundreds of km away, it projects
+// above the skyline as a slab of haze detached from any terrain. "Full column"
+// puts the upper troposphere back.
+export const AGL_LADDER = [10, 40, 80, 150, 250, 400, 600, 900, 1400, 2000];
 
 // Model levels the ladder interpolates from: enough of the low pressure
 // surfaces to bracket every rung, over terrain from sea level to 4.5 km.
@@ -78,6 +83,9 @@ export function volumetricIndices(meta, ids = TERRAIN_IDS) {
 export function fullColumnIndices(meta) {
   return volumetricIndices(meta, VOLUMETRIC_IDS);
 }
+
+// Deep ladder for "Full column": same true-AGL treatment, up to jet level.
+export const AGL_LADDER_FULL = [10, 80, 250, 600, 1200, 2200, 3500, 5500, 8000, 11000];
 
 export function levelName(level) {
   if (level.kind === "height_agl") return `${level.value} m (surface)`;
