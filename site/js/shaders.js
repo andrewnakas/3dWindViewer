@@ -97,6 +97,84 @@ float gapMeters(float sigma, float terr) {
 }
 `;
 
+// Terrain-driven flow physics. UPDATE_FRAG only — never include this in
+// DRAW_VERT, which runs twice per particle and is the expensive pass.
+//
+// The model wind is a 12 km-scale field; terrain forces it in ways the coarse
+// grid cannot show. Three effects, all faded out with height above ground:
+//
+//   w_oro = u . grad(h)          exact no-penetration boundary condition:
+//                                flow crossing a slope must climb it
+//   Ww = 1 + gS*Os + gC*Oc       Liston-Elder (MicroMet) speed weighting:
+//                                windward slopes and ridge crests speed up,
+//                                lee slopes and valleys slow down
+//   theta -= 0.5*slope*sin(2d)   Ryan (1977) diverting: oblique flow turns
+//                                toward alignment with the contours
+//
+// Os (slope in the wind direction) and Oc (curvature) are normalized to
+// [-0.5, 0.5] so Ww stays in [0.5, 1.5] when gS + gC = 1.
+const TERRAIN_PHYSICS = `
+uniform float u_tp;          // master gain; 0 disables the whole block
+uniform vec2 u_terrTexel;    // one terrain cell in normalized pos units
+uniform float u_oroDecayH;   // e-folding height (m AGL) of terrain influence
+uniform float u_gammaS;      // MicroMet slope weight
+uniform float u_gammaC;      // MicroMet curvature weight
+uniform float u_slopeScale;  // slope (m/m) -> Omega_s
+uniform float u_curvScale;   // curvature (1/m) -> Omega_c
+uniform float u_curvLength;  // curvature length scale (m)
+uniform float u_ryanGain;
+
+// Central-difference terrain gradient (m/m, x=east y=north) plus the
+// Liston-Elder 4-neighbour curvature. Note pos.y increases SOUTHWARD, so the
+// north sample is at -y and the north-south difference is (hN - hS).
+void terrainDerivs(vec2 pos, float terr, float lat, out vec2 grad, out float curvRaw) {
+  float hE = terrainHeight(pos + vec2(u_terrTexel.x, 0.0));
+  float hW = terrainHeight(pos - vec2(u_terrTexel.x, 0.0));
+  float hN = terrainHeight(pos - vec2(0.0, u_terrTexel.y));
+  float hS = terrainHeight(pos + vec2(0.0, u_terrTexel.y));
+  float dxm = u_lonSpan * u_terrTexel.x * 111320.0 * max(cos(radians(lat)), 0.05);
+  float dym = u_latSpan * u_terrTexel.y * 110540.0;
+  grad = vec2((hE - hW) / (2.0 * dxm), (hN - hS) / (2.0 * dym));
+  // positive on convex ground (ridges, knobs), negative in bowls and valleys
+  curvRaw = ((terr - 0.5 * (hW + hE)) + (terr - 0.5 * (hN + hS))) / (4.0 * u_curvLength);
+}
+
+vec3 applyTerrainPhysics(vec2 pos, vec3 wind, float terr, float agl, float lat) {
+  float fade = u_tp * exp(-max(agl, 0.0) / u_oroDecayH);
+  if (fade < 0.01 || length(wind.xy) < 0.1) return wind;
+
+  vec2 grad;
+  float curvRaw;
+  terrainDerivs(pos, terr, lat, grad, curvRaw);
+  vec2 dir = normalize(wind.xy);
+
+  float omegaS = clamp(dot(dir, grad) * u_slopeScale, -0.5, 0.5);
+  float omegaC = clamp(curvRaw * u_curvScale, -0.5, 0.5);
+  float Ww = clamp(1.0 + u_gammaS * omegaS + u_gammaC * omegaC, 0.5, 1.5);
+
+  // Ryan diverting: xi = uphill azimuth, d = angle from the wind to uphill.
+  // sin(2d) vanishes for straight up/downslope and cross-slope flow, and peaks
+  // at 45 degrees of obliquity — where terrain steering is strongest.
+  float theta = atan(wind.y, wind.x);
+  float xi = atan(grad.y, grad.x);
+  float d = mod(xi - theta + 3.14159265, 6.28318531) - 3.14159265;
+  float delta = 0.0;
+  if (abs(d) <= 1.57079633) {
+    float slopeDeg = degrees(atan(length(grad)));
+    delta = -0.5 * radians(min(slopeDeg, 45.0)) * sin(2.0 * d) * u_ryanGain;
+  }
+  delta = clamp(delta, -0.5236, 0.5236) * fade;
+
+  float c = cos(delta), s = sin(delta);
+  vec2 h = mat2(c, s, -s, c) * wind.xy;
+  h *= mix(1.0, Ww, fade);
+
+  // lift from the deflected wind: flow steered along the contours climbs less
+  float wOro = dot(h, grad) * fade;
+  return vec3(h, wind.z + wOro);
+}
+`;
+
 export const UPDATE_FRAG = `#version 300 es
 precision highp float;
 
@@ -116,6 +194,7 @@ uniform vec2 u_spawnMin;   // respawn region (normalized), follows the viewport
 uniform vec2 u_spawnMax;
 
 ${COMMON}
+${TERRAIN_PHYSICS}
 
 void main() {
   vec4 sp = texture(u_statePos, v_uv);
@@ -128,6 +207,8 @@ void main() {
   vec4 wind = sampleWind(pos, sigma, terr, heightM);
 
   float lat = u_north - pos.y * u_latSpan;
+  wind.xyz = applyTerrainPhysics(pos, wind.xyz, terr, heightM - terr, lat);
+
   float dlon = wind.x * u_dt / (111320.0 * max(cos(radians(lat)), 0.05));
   float dlat = wind.y * u_dt / 110540.0;
   vec2 npos = pos + vec2(dlon / u_lonSpan, -dlat / u_latSpan);

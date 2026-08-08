@@ -41,6 +41,11 @@ export function initUI(map, layer, meta) {
     layer.setLevels(vol.checked ? volumetricIndices(meta) : [Number(sel.value)]);
   });
 
+  // --- terrain flow physics ---
+  const tf = $("terrain-flow");
+  tf.checked = layer.terrainPhysics;
+  tf.addEventListener("change", () => { layer.terrainPhysics = tf.checked; });
+
   // --- wind altitude scale ---
   const alt = $("alt-scale");
   alt.value = String(layer.altScale);

@@ -90,11 +90,13 @@ async function main() {
 
     const layer = new WindLayer(map, meta, {
       exaggeration: 1.5,
+      terrainPhysics: new URLSearchParams(location.search).get("tp") !== "0",
       onReady: () => {
         initUI(map, layer, meta);
         new PointCast(map, layer, meta);
       },
     });
+    window.__windLayer = layer; // debugging hook
     if (isMobile) layer.particleCount = 65536;
     if (sessionStorage.getItem("lowmem")) layer.particleCount = 16384;
     try {

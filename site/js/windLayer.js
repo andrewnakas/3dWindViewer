@@ -124,6 +124,25 @@ export class WindLayer {
     this.system = null;
     this.frames = null;
     this.onReady = opts.onReady;
+
+    // Terrain-driven flow physics (see TERRAIN_PHYSICS in shaders.js).
+    this.terrainPhysics = opts.terrainPhysics ?? true;
+    this.tuning = {
+      // Master gain. Below 1 because HRRR already resolves some terrain
+      // response at 3 km — this adds only what the 12 km regrid smoothed away.
+      gain: 0.7,
+      oroDecayH: 800,   // terrain influence e-folds out over ~800 m AGL
+      gammaS: 0.5,      // slope and curvature weights sum to 1 so the
+      gammaC: 0.5,      // speed factor stays within [0.5, 1.5]
+      // Normalizations are calibrated so the 90th-percentile slope and
+      // curvature over mountainous terrain map to the +/-0.5 ends of the
+      // MicroMet range. Regridding flattens terrain, so these depend on the
+      // grid: values below are for the 12.8 km atlas tile.
+      slopeScale: 15.0,
+      curvScale: 35.0,
+      curvLength: 12800.0,
+      ryanGain: 1.0,
+    };
   }
 
   onAdd(map, gl) {
@@ -283,6 +302,17 @@ export class WindLayer {
     const spawn = this.spawnBounds();
     gl.uniform2fv(U.u_spawnMin, spawn.min);
     gl.uniform2fv(U.u_spawnMax, spawn.max);
+
+    const tp = this.tuning;
+    gl.uniform1f(U.u_tp, this.terrainPhysics ? tp.gain : 0.0);
+    gl.uniform2f(U.u_terrTexel, 1 / this.meta.tile.width, 1 / this.meta.tile.height);
+    gl.uniform1f(U.u_oroDecayH, tp.oroDecayH);
+    gl.uniform1f(U.u_gammaS, tp.gammaS);
+    gl.uniform1f(U.u_gammaC, tp.gammaC);
+    gl.uniform1f(U.u_slopeScale, tp.slopeScale);
+    gl.uniform1f(U.u_curvScale, tp.curvScale);
+    gl.uniform1f(U.u_curvLength, tp.curvLength);
+    gl.uniform1f(U.u_ryanGain, tp.ryanGain);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, sys.curState.pos);
