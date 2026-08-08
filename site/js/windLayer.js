@@ -143,6 +143,11 @@ export class WindLayer {
       curvScale: 35.0,     // atlas-tile fallback only; hi-res ships normalized
       curvLength: 12800.0,
       ryanGain: 1.0,
+      // Lee sheltering costs 8 extra terrain samples per particle; it is the
+      // only term that produces wake shadows, so it stays on by default and
+      // drops out on the low-memory path with everything else.
+      leeGain: 0.6,
+      leeDistM: 10000.0,
     };
   }
 
@@ -333,6 +338,8 @@ export class WindLayer {
     gl.uniform1f(U.u_curvScale, tp.curvScale);
     gl.uniform1f(U.u_curvLength, tp.curvLength);
     gl.uniform1f(U.u_ryanGain, tp.ryanGain);
+    gl.uniform1f(U.u_leeGain, tp.leeGain);
+    gl.uniform1f(U.u_leeDistM, tp.leeDistM);
     this.setTerrainUniforms(gl, U, 7);
 
     gl.activeTexture(gl.TEXTURE0);

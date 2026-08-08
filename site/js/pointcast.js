@@ -119,8 +119,11 @@ export class PointCast {
     if (!n) return;
     this.profile = this.samples(img, n);
     const { lng, lat } = this.point;
+    // The profile stays raw model wind — it is the forecast sounding, and
+    // terrain flow is a visualization-side downscaling of it, not new data.
+    const note = this.layer.terrainPhysics ? " · model wind (map adds terrain flow)" : "";
     this.titleEl.textContent =
-      `${lat.toFixed(2)}°, ${lng.toFixed(2)}° · +${near.lead_hours} h · ground ${Math.round(this.profile.ground)} m`;
+      `${lat.toFixed(2)}°, ${lng.toFixed(2)}° · +${near.lead_hours} h · ground ${Math.round(this.profile.ground)} m${note}`;
     this.draw();
   }
 

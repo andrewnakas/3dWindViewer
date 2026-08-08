@@ -134,6 +134,26 @@ uniform float u_slopeScale;  // slope (m/m) -> Omega_s
 uniform float u_curvScale;   // curvature (1/m) -> Omega_c
 uniform float u_curvLength;  // curvature length scale (m)
 uniform float u_ryanGain;
+uniform float u_leeGain;     // lee sheltering strength; 0 skips the raymarch
+uniform float u_leeDistM;    // how far upwind to look for sheltering terrain
+
+// Winstral's Sx: the steepest slope to any point upwind within u_leeDistM.
+// Positive means something upwind stands higher than here, so this spot sits
+// in a wake and the flow over it is slack. Speed-up and lift alone cannot
+// produce that — they only know the ground directly underfoot, which is why
+// terrain downscaling schemes carry this term separately.
+float shelterTangent(vec2 pos, vec2 dirN, float terr, float lat) {
+  float mx = 0.0;
+  float mPerLon = 111320.0 * max(cos(radians(lat)), 0.05);
+  for (int i = 1; i <= 8; i++) {
+    float d = u_leeDistM * float(i) / 8.0;
+    // step upwind; pos.y runs southward so the north component flips
+    vec2 up = pos - vec2(dirN.x * d / mPerLon / u_lonSpan,
+                        -dirN.y * d / 110540.0 / u_latSpan);
+    mx = max(mx, (terrainHeight(up) - terr) / d);
+  }
+  return mx;
+}
 
 // Central-difference terrain gradient (m/m, x=east y=north) plus curvature,
 // normalized to [-0.5, 0.5]. Note pos.y increases SOUTHWARD, so the north
@@ -186,6 +206,11 @@ vec3 applyTerrainPhysics(vec2 pos, vec3 wind, float terr, float agl, float lat) 
   float c = cos(delta), s = sin(delta);
   vec2 h = mat2(c, s, -s, c) * wind.xy;
   h *= mix(1.0, Ww, fade);
+
+  if (u_leeGain > 0.0) {
+    float sx = clamp(shelterTangent(pos, dir, terr, lat), 0.0, 0.5);
+    h *= 1.0 - u_leeGain * sx * 2.0 * fade;
+  }
 
   // lift from the deflected wind: flow steered along the contours climbs less
   float wOro = dot(h, grad) * fade;
