@@ -193,6 +193,10 @@ vec3 applyTerrainPhysics(vec2 pos, vec3 wind, float terr, float agl, float lat) 
   // Ryan diverting: xi = uphill azimuth, d = angle from the wind to uphill.
   // sin(2d) vanishes for straight up/downslope and cross-slope flow, and peaks
   // at 45 degrees of obliquity — where terrain steering is strongest.
+  // Turning stays small (a few degrees) because it is proportional to the
+  // terrain angle, and a 2.1 km grid resolves ridges as 5-13 degree ramps
+  // rather than the 30+ degree walls they are. That is the grid's limit, not
+  // a weak constant — raise u_ryanGain to exaggerate, at the cost of fidelity.
   float theta = atan(wind.y, wind.x);
   float xi = atan(grad.y, grad.x);
   float d = mod(xi - theta + 3.14159265, 6.28318531) - 3.14159265;

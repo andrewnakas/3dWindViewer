@@ -14,6 +14,7 @@ reproject LCC → lat/lon · downsample to ~12 km · rotate winds grid→earth
         ▼
 49 texture-atlas PNGs (one per forecast hour; 41 level tiles each, u/v in R/G,
 per-level scaling in meta.json)  ≈ 150 MB
+   + terrain.png — one ~2.1 km elevation + curvature texture for terrain flow
         │  deployed with the static site as one GitHub Pages artifact
         ▼
 MapLibre GL JS + custom WebGL2 layer: GPU particle advection sampling the
@@ -24,6 +25,21 @@ atlas, particles drawn at each level's altitude above 3D terrain
 - **No data in git**: `site/data/` exists only inside the Pages deployment artifact; a failed build leaves the previous forecast live.
 - **Terrain**: AWS Terrain Tiles (terrarium encoding) with adjustable exaggeration; Carto Dark Matter basemap.
 - **Particles**: [webgl-wind](https://github.com/mapbox/webgl-wind)-style GPU advection upgraded to WebGL2 with a **continuous vertical coordinate** — particles rise and sink with HRRR's vertical velocity (omega, atlas B channel), so orographic uplift and convection are real 3D motion between levels. Levels sit at each run's actual mean geopotential heights, and below-ground pressure levels (e.g. 925 hPa over the Rockies) are masked out using surface pressure. Falls back from float to packed-RGBA8 state on GPUs without float rendering (iOS).
+
+### Terrain flow physics
+
+HRRR's 12 km-regridded wind cannot show how air behaves against a specific ridge, so the update shader downscales it with four standard terrain-flow terms, each faded out with height above ground (toggle: *Terrain flow*).
+
+| Term | Effect |
+|---|---|
+| `w = u·∇h` (kinematic boundary condition) | air crossing a slope must climb it — windward updrafts, lee downdrafts |
+| Liston–Elder `Ww = 1 + γs·Ωs + γc·Ωc` | ridge crests and windward faces accelerate; valleys and lee slopes slow |
+| Ryan (1977) diverting | oblique flow turns toward alignment with the contours |
+| Winstral `Sx` | terrain standing upwind casts a wake, slowing the air in its lee |
+
+Because these read the *slope* of the ground — exactly what downsampling destroys — terrain ships as its own ~2.1 km texture (`terrain.png`: 16-bit elevation plus precomputed curvature) rather than riding in the 12.8 km atlas. Over SW Montana at 20 m/s this produces updrafts of ~1.7 m/s (99th percentile, peaks above 3 m/s) and ±3.5 m/s of speed variation, decaying to near nothing by 1500 m AGL. Total frame cost is about 1%.
+
+This is a downscaling correction, not new data: the point-forecast panel deliberately keeps showing the raw model sounding.
 
 ## Local development
 
