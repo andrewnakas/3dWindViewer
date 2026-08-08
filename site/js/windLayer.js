@@ -317,7 +317,8 @@ export class WindLayer {
     // simulated seconds per frame, scaled down when zoomed in so motion stays
     // smooth (constant-ish screen-space speed)
     const zoomFactor = Math.min(1, Math.pow(1.6, 4 - this.map.getZoom()));
-    gl.uniform1f(U.u_dt, 90.0 * this.speedFactor * Math.max(zoomFactor, 0.03));
+    const dtSeconds = 90.0 * this.speedFactor * Math.max(zoomFactor, 0.03);
+    gl.uniform1f(U.u_dt, dtSeconds);
     gl.uniform1f(U.u_maxAge, MAX_AGE);
     gl.uniform1f(U.u_time, (performance.now() % 100000) / 1000);
     const spawn = this.spawnBounds();
@@ -340,6 +341,14 @@ export class WindLayer {
     gl.uniform1f(U.u_ryanGain, tp.ryanGain);
     gl.uniform1f(U.u_leeGain, tp.leeGain);
     gl.uniform1f(U.u_leeDistM, tp.leeDistM);
+    // A fast particle covers ~2.7 km per 90 s step, more than one hi-res
+    // terrain cell, so without substeps it can hop a ridge without ever
+    // sampling it. Only worth paying for when the physics is actually on.
+    const cellKm = hiRes ? 2.1 : 12.7;
+    const stepKm = (35.0 * dtSeconds) / 1000.0; // a fast jet, not the mean
+    gl.uniform1i(U.u_substeps, this.terrainPhysics
+      ? Math.max(1, Math.min(4, Math.ceil(stepKm / cellKm)))
+      : 1);
     this.setTerrainUniforms(gl, U, 7);
 
     gl.activeTexture(gl.TEXTURE0);

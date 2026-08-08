@@ -235,6 +235,9 @@ uniform float u_maxAge;
 uniform float u_time;
 uniform vec2 u_spawnMin;   // respawn region (normalized), follows the viewport
 uniform vec2 u_spawnMax;
+uniform int u_substeps;
+
+#define MAX_SUBSTEPS 4
 
 ${COMMON}
 ${TERRAIN_PHYSICS}
@@ -245,19 +248,26 @@ void main() {
   vec2 pos = statePos(sp);
   float sigma = sa.r;
 
-  float terr = terrainHeight(pos);
-  float heightM;
-  vec4 wind = sampleWind(pos, sigma, terr, heightM);
-
-  float lat = u_north - pos.y * u_latSpan;
-  wind.xyz = applyTerrainPhysics(pos, wind.xyz, terr, heightM - terr, lat);
-
-  float dlon = wind.x * u_dt / (111320.0 * max(cos(radians(lat)), 0.05));
-  float dlat = wind.y * u_dt / 110540.0;
-  vec2 npos = pos + vec2(dlon / u_lonSpan, -dlat / u_latSpan);
+  // Integrate in substeps when the terrain is fine enough that one 90 s jump
+  // would clear a whole cell — a particle that leaps a ridge never feels it.
+  vec2 npos = pos;
   float nsigma = sigma;
-  if (u_stackLen > 1) {
-    nsigma = clamp(sigma + (wind.z * u_dt) / gapMeters(sigma, terr) / float(u_stackLen - 1), 0.0, 1.0);
+  vec4 wind = vec4(0.0);
+  float sdt = u_dt / float(u_substeps);
+  for (int k = 0; k < MAX_SUBSTEPS; k++) {
+    if (k >= u_substeps) break;
+    float terr = terrainHeight(npos);
+    float heightM;
+    wind = sampleWind(npos, nsigma, terr, heightM);
+    float lat = u_north - npos.y * u_latSpan;
+    wind.xyz = applyTerrainPhysics(npos, wind.xyz, terr, heightM - terr, lat);
+
+    float dlon = wind.x * sdt / (111320.0 * max(cos(radians(lat)), 0.05));
+    float dlat = wind.y * sdt / 110540.0;
+    npos += vec2(dlon / u_lonSpan, -dlat / u_latSpan);
+    if (u_stackLen > 1) {
+      nsigma = clamp(nsigma + (wind.z * sdt) / gapMeters(nsigma, terr) / float(u_stackLen - 1), 0.0, 1.0);
+    }
   }
 
   bool oob = npos.x < 0.0 || npos.x > 1.0 || npos.y < 0.0 || npos.y > 1.0 || wind.a < 0.5;
