@@ -3,6 +3,10 @@
 // Each cached frame is a ~20 MB GPU texture; keep the cap low for mobile GPUs.
 const CACHE_MAX = 4;
 
+// Scratch texture unit for uploads — above every unit the wind shaders bind
+// (0-7), so an upload mid-frame cannot disturb a sampler in use.
+const UPLOAD_UNIT = 12;
+
 export class FrameManager {
   constructor(gl, meta, basePath = "data/") {
     this.gl = gl;
@@ -82,6 +86,11 @@ export class FrameManager {
   upload(bitmap) {
     const gl = this.gl;
     const tex = gl.createTexture();
+    // Uploads land between frames on whichever unit happened to be active, and
+    // unbinding at the end would leave that unit empty — if it was one the
+    // wind shaders sample from, the next draw is INVALID_OPERATION. Do the
+    // work on a high scratch unit nothing samples, and leave unit 0 active.
+    gl.activeTexture(gl.TEXTURE0 + UPLOAD_UNIT);
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
@@ -89,7 +98,7 @@ export class FrameManager {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.activeTexture(gl.TEXTURE0);
     return tex;
   }
 
@@ -117,9 +126,14 @@ export class FrameManager {
         return createImageBitmap(blob, opts).catch(() => createImageBitmap(blob));
       })
       .then((bmp) => {
-        this.terrainTex = this.upload(bmp);
+        // Build the texture in a local first: `upload` rebinds texture units
+        // and leaves this one bound, so publishing the field before it returns
+        // lets a render in the same tick bind a texture that is not yet
+        // complete, which makes the whole draw INVALID_OPERATION.
+        const tex = this.upload(bmp);
         bmp.close();
-        onLoad?.(this.terrainTex);
+        this.terrainTex = tex;
+        onLoad?.(tex);
       })
       .catch((e) => console.warn("hi-res terrain unavailable, using atlas tile:", e.message));
   }
