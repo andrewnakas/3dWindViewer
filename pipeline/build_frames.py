@@ -6,6 +6,7 @@ Usage:
 
 import argparse
 import logging
+import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,6 +23,11 @@ from terrain import build_terrain_fields, write_terrain_png
 log = logging.getLogger("build_frames")
 
 SFC_VARS = [("wind_u_10m", "wind_v_10m"), ("wind_u_80m", "wind_v_80m")]
+
+# Set TERRAIN_FALLBACK_OK=1 to publish without the hi-res terrain texture (the
+# terrain physics then runs on the coarse atlas tile). Off by default so a
+# broken terrain build fails loudly instead of quietly shipping degraded.
+ALLOW_TERRAIN_FALLBACK = os.environ.get("TERRAIN_FALLBACK_OK") == "1"
 
 
 def build_frame(sfc, prs, init, lead, index_map, attempts=3):
@@ -118,6 +124,9 @@ def main():
 
     terrain_hi_meta = None
     try:
+        # write_output creates this later, but the terrain texture is written
+        # first and a clean checkout has no site/data yet.
+        Path(args.out).mkdir(parents=True, exist_ok=True)
         elev, curv, valid_hi, curv_max = build_terrain_fields(
             orography, prs.x.values, prs.y.values
         )
@@ -130,8 +139,13 @@ def main():
             terrain_hi_meta["width"], terrain_hi_meta["height"],
             terrain_hi_meta["hMin"], terrain_hi_meta["hMax"], curv_max,
         )
-    except Exception as e:  # noqa: BLE001 - terrain physics degrades to the atlas tile
-        log.warning("hi-res terrain build failed (%s); frontend will use the atlas tile", e)
+    except Exception:  # noqa: BLE001
+        # Only a DEM fetch problem is worth degrading for — anything else is a
+        # bug, and swallowing it ships a build that looks green while silently
+        # dropping the terrain physics, which is how this shipped broken once.
+        log.exception("hi-res terrain build failed; frontend will use the atlas tile")
+        if not ALLOW_TERRAIN_FALLBACK:
+            raise
 
     frames_by_lead = {}
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
