@@ -15,6 +15,8 @@ Channels:
   A    = validity (inside the HRRR domain)
 """
 
+import logging
+
 import numpy as np
 from PIL import Image
 
@@ -28,6 +30,8 @@ from config import (
     WEST,
 )
 from reproject import build_index_map, regrid
+
+log = logging.getLogger("terrain")
 
 
 def cell_size_meters(nx=TERRAIN_HI_W, ny=TERRAIN_HI_H, lat_ref=45.0):
@@ -63,20 +67,50 @@ def curvature(elev, cell_m, length_scale=CURV_LENGTH_M):
     return curv
 
 
-def build_terrain_fields(native_height, x_coords, y_coords):
-    """Regrid HRRR orography to the hi-res grid and derive curvature.
+def build_terrain_fields(native_height, x_coords, y_coords, use_dem=True):
+    """Build the hi-res terrain fields: elevation, curvature, validity.
 
-    Returns (elev, curv_norm, valid, curv_max) where curv_norm is in
-    [-0.5, 0.5] and curv_max is the normalization constant (1/m).
+    Prefers the real terrarium DEM — the same surface MapLibre renders, so
+    particles sit on the terrain the viewer can actually see. HRRR's own
+    orography is a fallback: it is the surface the weather model ran on, but
+    it smooths summits by 700-1600 m, which puts particles inside peaks and
+    high above valleys.
+
+    Returns (elev, curv_norm, valid, curv_ref).
     """
     imap = build_index_map(x_coords, y_coords, TERRAIN_HI_W, TERRAIN_HI_H)
-    # Target (~2.1 km) is finer than native (3 km), so this is interpolation,
-    # not downsampling — no pre-smoothing needed or wanted.
-    elev = regrid(native_height, imap)
-    valid = ~np.isnan(elev)
+    hrrr = regrid(native_height, imap)
+    valid = ~np.isnan(hrrr)   # HRRR defines the domain either way
 
     dx, dy = cell_size_meters()
-    curv = curvature(elev, 0.5 * (dx + dy))
+    elev = None
+    if use_dem:
+        try:
+            from dem import fetch_dem, resample_to_grid
+
+            mosaic, lon_axis, lat_axis = fetch_dem()
+            peak, mean = resample_to_grid(
+                mosaic, lon_axis, lat_axis, TERRAIN_HI_W, TERRAIN_HI_H
+            )
+            # Summits drive what particles collide with; slopes come from the
+            # mean field so gradients represent the cell, not its highest pixel.
+            elev = peak
+            curv = curvature(mean, 0.5 * (dx + dy))
+        except Exception as e:  # noqa: BLE001 - fall back to model orography
+            log.warning("DEM fetch failed (%s); falling back to HRRR orography", e)
+            elev = None
+
+    if elev is None:
+        elev = hrrr
+        curv = curvature(elev, 0.5 * (dx + dy))
+
+    # Bathymetry is irrelevant to surface wind and would spend half the 16-bit
+    # elevation range on the sea floor; wind over water blows at sea level.
+    # The upper clamp drops the handful of corrupt DEM samples (a few pixels
+    # read 6-8 km); nothing in the domain is above Whitney at 4421 m, and
+    # letting them through would stretch the encoding range for everyone.
+    elev = np.clip(elev, 0.0, 4600.0)
+    elev = np.where(valid, np.nan_to_num(elev), np.nan)
     curv[~valid] = 0.0
 
     # Normalize against a high percentile of *mountainous* curvature rather

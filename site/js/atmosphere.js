@@ -38,11 +38,23 @@ export function rampTextureData(n = 256) {
 // Levels stacked in volumetric mode (by id), surface -> jet stream.
 export const VOLUMETRIC_IDS = ["10m", "925", "850", "700", "600", "500", "400", "300", "250", "200"];
 
-export function volumetricIndices(meta) {
-  return VOLUMETRIC_IDS
+// Default stack: the air that actually meets the ground. The full troposphere
+// reaches 12 km, so a quarter of the particles end up above every CONUS
+// summit — physically right, but they read as a haze in the sky and bury the
+// terrain interaction you came to look at. These levels top out near 4.5 km,
+// just above the highest peaks, and pack the same particle budget into the
+// layer where wind and mountains actually meet.
+export const TERRAIN_IDS = ["10m", "80m", "925", "900", "850", "800", "750", "700", "650", "600"];
+
+export function volumetricIndices(meta, ids = TERRAIN_IDS) {
+  return ids
     .map((id) => meta.levels.find((l) => l.id === id))
     .filter(Boolean)
     .map((l) => l.index);
+}
+
+export function fullColumnIndices(meta) {
+  return volumetricIndices(meta, VOLUMETRIC_IDS);
 }
 
 export function levelName(level) {

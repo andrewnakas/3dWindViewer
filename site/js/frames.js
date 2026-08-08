@@ -106,9 +106,12 @@ export class FrameManager {
     fetch(url)
       .then((r) => {
         if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
-        return r.blob();
+        // arrayBuffer rather than blob: at this texture's size (~15 MB, 42 MB
+        // decoded) blob() fails outright in some Chrome builds.
+        return r.arrayBuffer();
       })
-      .then((blob) => {
+      .then((buf) => {
+        const blob = new Blob([buf], { type: "image/png" });
         const opts = { premultiplyAlpha: "none" };
         if (half) Object.assign(opts, { resizeWidth: hi.width >> 1, resizeHeight: hi.height >> 1 });
         return createImageBitmap(blob, opts).catch(() => createImageBitmap(blob));

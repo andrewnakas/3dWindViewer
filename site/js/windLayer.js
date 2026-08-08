@@ -112,9 +112,11 @@ export class WindLayer {
     this.time = 0;              // forecast hour, continuous
     this.speedFactor = 1.0;
     this.exaggeration = opts.exaggeration ?? 1.5;
-    // Height-above-terrain exaggeration (terrain base always follows the map's
-    // own exaggeration so particles hug the rendered surface).
-    this.altScale = opts.altScale ?? 2;
+    // Height-above-terrain exaggeration. Defaults to the terrain's own
+    // exaggeration so altitude is drawn at the same scale as the mountains —
+    // any larger and particles float above the peaks they should be hitting
+    // (at 2x, a particle 3 km up was drawn 1.5 km too high).
+    this.altScale = opts.altScale ?? this.exaggeration;
     this.opacity = 1.0;
     this.volumetric = opts.volumetric ?? true;
     this.levelIndices = this.volumetric
@@ -136,10 +138,11 @@ export class WindLayer {
       gammaC: 0.5,      // speed factor stays within [0.5, 1.5]
       // Slope normalization is calibrated so the 90th-percentile slope over
       // mountainous terrain reaches the +/-0.5 ends of the MicroMet range.
-      // Regridding flattens terrain, so it depends on the grid: the 12.8 km
-      // atlas tile keeps far less slope than the 2.1 km terrain texture.
+      // It depends on the grid: the 12.8 km atlas tile flattens terrain far
+      // more than the 1.4 km real-DEM texture (Montana p90 slope 0.033 vs
+      // 0.161), so the two need very different scalings.
       slopeScale: 15.0,
-      slopeScaleHi: 6.0,
+      slopeScaleHi: 3.1,
       curvScale: 35.0,     // atlas-tile fallback only; hi-res ships normalized
       curvLength: 12800.0,
       ryanGain: 1.0,
@@ -276,10 +279,43 @@ export class WindLayer {
       let x1 = (mb.getEast() - b.west) / lonSpan;
       let y0 = (b.north - mb.getNorth()) / latSpan;
       let y1 = (b.north - mb.getSouth()) / latSpan;
+
+      // At a high pitch getBounds() runs to the horizon, and the visible
+      // ground area grows with the square of distance — so uniform seeding
+      // over those bounds puts almost every particle in the far distance,
+      // where it is a thin haze near the skyline, and leaves the terrain in
+      // front of the camera bare. Anchor the box on what the middle of the
+      // screen is actually pointing at and size it from the near field.
+      const cam = this.map.unproject([
+        this.map.getCanvas().clientWidth / 2,
+        this.map.getCanvas().clientHeight * 0.72,
+      ]);
+      const cx = (cam.lng - b.west) / lonSpan;
+      const cy = (b.north - cam.lat) / latSpan;
+      // Width of the view at the bottom of the screen ~ the near-field scale.
+      const near = this.map.unproject([0, this.map.getCanvas().clientHeight]);
+      const nearR = this.map.unproject([
+        this.map.getCanvas().clientWidth,
+        this.map.getCanvas().clientHeight,
+      ]);
+      const reach = Math.max(Math.abs(nearR.lng - near.lng) / lonSpan, 0.0005) * 1.6;
+      x0 = Math.max(x0, cx - reach); x1 = Math.min(x1, cx + reach);
+      y0 = Math.max(y0, cy - reach); y1 = Math.min(y1, cy + reach);
+      if (!(x1 > x0 && y1 > y0)) {
+        // Degenerate (camera pointing off-domain) — fall back to the raw view.
+        x0 = Math.max(0, (mb.getWest() - b.west) / lonSpan);
+        x1 = Math.min(1, (mb.getEast() - b.west) / lonSpan);
+        y0 = Math.max(0, (b.north - mb.getNorth()) / latSpan);
+        y1 = Math.min(1, (b.north - mb.getSouth()) / latSpan);
+      }
       const padX = (x1 - x0) * 0.15, padY = (y1 - y0) * 0.15;
       x0 = Math.max(0, x0 - padX); x1 = Math.min(1, x1 + padX);
       y0 = Math.max(0, y0 - padY); y1 = Math.min(1, y1 + padY);
-      if (x1 - x0 > 0.01 && y1 - y0 > 0.01) return { min: [x0, y0], max: [x1, y1] };
+      // A zoomed-in view is a tiny fraction of CONUS — at zoom 11 it is well
+      // under 0.1% — so only reject a box that is empty or inverted. Demanding
+      // a minimum size here sent every close-up view back to seeding the whole
+      // continent, which is exactly when viewport-following matters most.
+      if (x1 > x0 && y1 > y0) return { min: [x0, y0], max: [x1, y1] };
     } catch { /* fall through */ }
     return { min: [0, 0], max: [1, 1] };
   }

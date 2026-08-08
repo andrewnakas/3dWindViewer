@@ -38,16 +38,15 @@ assert ATLAS_W <= 4096 and ATLAS_H <= 4096, "atlas exceeds safe WebGL texture si
 # Standalone high-resolution terrain texture (its own PNG, not an atlas tile).
 # The wind atlas is deliberately coarse — 12.8 km cells are plenty for a
 # smooth wind field — but terrain physics reads the SLOPE of the ground, and
-# regridding flattens slopes badly: the 12.8 km tile keeps only ~40% of the
-# slope HRRR actually resolves. At 2.1 km we recover nearly all of it (90th
-# percentile slope over the Rockies: 0.033 -> 0.085, against 0.031 native).
-# Going finer than this buys little, since HRRR's own orography is 3 km.
-TERRAIN_HI_W, TERRAIN_HI_H = 2700, 1590
+# it has to place particles on the same surface MapLibre draws. Both demand
+# far more resolution than the atlas, hence a separate texture at the largest
+# size that is still safe to upload (~1.4 km cells).
+TERRAIN_HI_W, TERRAIN_HI_H = 4096, 2560
 assert TERRAIN_HI_W <= 4096 and TERRAIN_HI_H <= 4096, "terrain exceeds safe texture size"
 
 # Curvature length scale (eta): roughly half the wavelength of the terrain
-# features that should drive ridge speed-up. ~1 cell of the hi-res grid.
-CURV_LENGTH_M = 2500.0
+# features that should drive ridge speed-up. ~2 cells of the hi-res grid.
+CURV_LENGTH_M = 2800.0
 
 # HRRR native grid / projection (verified against the dataset's spatial_ref).
 LCC_PROJ = (

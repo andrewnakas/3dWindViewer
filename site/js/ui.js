@@ -1,6 +1,6 @@
 // DOM control wiring.
 
-import { levelName, drawLegend, volumetricIndices } from "./atmosphere.js";
+import { levelName, drawLegend, volumetricIndices, fullColumnIndices } from "./atmosphere.js";
 
 export function initUI(map, layer, meta) {
   const $ = (id) => document.getElementById(id);
@@ -33,12 +33,20 @@ export function initUI(map, layer, meta) {
 
   // --- volumetric toggle ---
   const vol = $("volumetric");
+  const full = $("full-column");
+  const stackIndices = () => (full.checked ? fullColumnIndices(meta) : volumetricIndices(meta));
   vol.checked = layer.volumetric;
   sel.disabled = vol.checked;
+  full.disabled = !vol.checked;
   vol.addEventListener("change", () => {
     sel.disabled = vol.checked;
+    full.disabled = !vol.checked;
     layer.volumetric = vol.checked;
-    layer.setLevels(vol.checked ? volumetricIndices(meta) : [Number(sel.value)]);
+    layer.setLevels(vol.checked ? stackIndices() : [Number(sel.value)]);
+  });
+  full.addEventListener("change", () => {
+    layer.fullColumn = full.checked;
+    if (vol.checked) layer.setLevels(stackIndices());
   });
 
   // --- terrain flow physics ---
@@ -47,12 +55,19 @@ export function initUI(map, layer, meta) {
   tf.addEventListener("change", () => { layer.terrainPhysics = tf.checked; });
 
   // --- wind altitude scale ---
+  // Follows terrain exaggeration until the user moves it, so altitude is drawn
+  // at the same scale as the mountains and particles meet the peaks.
   const alt = $("alt-scale");
-  alt.value = String(layer.altScale);
-  $("alt-val").textContent = `${layer.altScale}×`;
+  let altPinned = false;
+  const showAlt = () => {
+    alt.value = String(layer.altScale);
+    $("alt-val").textContent = `${Number(layer.altScale).toFixed(1)}×`;
+  };
+  showAlt();
   alt.addEventListener("input", () => {
+    altPinned = true;
     layer.altScale = Number(alt.value);
-    $("alt-val").textContent = `${alt.value}×`;
+    $("alt-val").textContent = `${Number(alt.value).toFixed(1)}×`;
   });
 
   // --- panel collapse ---
@@ -71,6 +86,10 @@ export function initUI(map, layer, meta) {
     const v = Number(ex.value);
     $("exag-val").textContent = v.toFixed(1);
     layer.exaggeration = v;
+    if (!altPinned) {
+      layer.altScale = v;
+      showAlt();
+    }
     map.setTerrain(v > 0 ? { source: "terrain-dem", exaggeration: v } : null);
   });
 

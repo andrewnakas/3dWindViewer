@@ -37,7 +37,9 @@ HRRR's 12 km-regridded wind cannot show how air behaves against a specific ridge
 | Ryan (1977) diverting | oblique flow turns toward alignment with the contours |
 | Winstral `Sx` | terrain standing upwind casts a wake, slowing the air in its lee |
 
-Because these read the *slope* of the ground — exactly what downsampling destroys — terrain ships as its own ~2.1 km texture (`terrain.png`: 16-bit elevation plus precomputed curvature) rather than riding in the 12.8 km atlas. Over SW Montana at 20 m/s this produces updrafts of ~1.7 m/s (99th percentile, peaks above 3 m/s) and ±3.5 m/s of speed variation, decaying to near nothing by 1500 m AGL. Total frame cost is about 1%.
+These read the *slope* of the ground and have to place particles on the surface you can see, so terrain ships as its own ~1.4 km texture (`terrain.png`: 16-bit elevation plus precomputed curvature) built from the **same terrarium DEM MapLibre renders**, not from HRRR's orography — the model smooths summits by 700–1600 m, which floats particles over valleys and buries them inside peaks. Downsampling keeps the max, not the mean, so summits survive: regional high points land within ~50 m of true.
+
+The default stack spans 10 m to 4.5 km, which is where air meets mountains; *Full column* extends it to the 12 km jet stream. Over SW Montana at 20 m/s the physics gives updrafts of ~2.8 m/s (99th percentile, peaks above 5 m/s) and ±4 m/s of speed variation, decaying to near nothing by 1500 m AGL. Total frame cost is about 1%.
 
 This is a downscaling correction, not new data: the point-forecast panel deliberately keeps showing the raw model sounding.
 
