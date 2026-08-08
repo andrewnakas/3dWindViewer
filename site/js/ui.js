@@ -1,7 +1,7 @@
 // DOM control wiring.
 
 import {
-  levelName, drawLegend, volumetricIndices, fullColumnIndices,
+  levelName, drawLegend, volumetricIndices, fullColumnIndices, ladderSourceIndices,
   AGL_LADDER, AGL_LADDER_FULL,
 } from "./atmosphere.js";
 
@@ -37,7 +37,13 @@ export function initUI(map, layer, meta) {
   // --- volumetric toggle ---
   const vol = $("volumetric");
   const full = $("full-column");
-  const stackIndices = () => (full.checked ? fullColumnIndices(meta) : volumetricIndices(meta));
+  // With the AGL ladder the stack is the set of model levels the rungs
+  // interpolate from, not the rungs themselves — returning the plain
+  // volumetric list here left the low rungs without levels to bracket them.
+  const stackIndices = () => {
+    if (full.checked) return fullColumnIndices(meta);
+    return layer.useAglLadder ? ladderSourceIndices(meta) : volumetricIndices(meta);
+  };
   vol.checked = layer.volumetric;
   sel.disabled = vol.checked;
   full.disabled = !vol.checked;

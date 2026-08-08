@@ -35,8 +35,12 @@ export function rampTextureData(n = 256) {
   return data;
 }
 
-// Levels stacked in volumetric mode (by id), surface -> jet stream.
-export const VOLUMETRIC_IDS = ["10m", "925", "850", "700", "600", "500", "400", "300", "250", "200"];
+// Levels stacked in volumetric mode (by id), surface -> jet stream. Includes
+// 80m and 1000 hPa so the low rungs of the deep ladder still have levels
+// bracketing them over low ground, where 925 hPa is already 800 m up.
+export const VOLUMETRIC_IDS = [
+  "10m", "80m", "1000", "925", "850", "700", "500", "400", "300", "250", "200",
+];
 
 // Default stack: the air that actually meets the ground. The full troposphere
 // reaches 12 km, so a quarter of the particles end up above every CONUS
