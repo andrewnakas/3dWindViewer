@@ -88,9 +88,81 @@ float levelAgl(int j, float terr) {
   return agl > floorAgl ? agl : floorAgl;
 }
 
+// --- true height-above-ground sampling -------------------------------------
+//
+// HRRR only carries 10 m and 80 m as genuine above-ground winds; everything
+// above that is a pressure surface, whose height above the ground depends on
+// how high the ground is. Riding those surfaces directly means a particle's
+// height above terrain changes as it crosses a valley, and over a summit the
+// low ones are underground entirely.
+//
+// So particles instead ride a fixed AGL ladder — 10 m, 80 m, 150 m … — and
+// the wind at each rung is interpolated from whichever model levels bracket
+// that height over this particular terrain. 100 m AGL is genuinely 100 m
+// above the ground everywhere, over valley floors and summits alike.
+uniform float u_aglLadder[${MAX_STACK}];
+uniform float u_useLadder;
+uniform int u_ladderLen;   // rungs on the ladder (independent of source levels)
+
+// Wind at a given height above ground, blended between the two model levels
+// that straddle it.
+vec4 windAtAgl(vec2 pos, float aglTarget, float terr) {
+  vec2 tl = clamp(pos, u_clampMin, u_clampMax) * u_tileScale;
+  float targetASL = terr + aglTarget;
+
+  // Walk up the model levels to find the bracketing pair.
+  int lo = 0;
+  for (int k = 0; k < ${MAX_STACK}; k++) {
+    if (k >= u_stackLen) break;
+    float hk = u_isAgl[k] > 0.5 ? terr + u_height[k] : u_height[k];
+    if (hk <= targetASL) lo = k;
+  }
+  int hi = min(lo + 1, u_stackLen - 1);
+
+  float hLo = u_isAgl[lo] > 0.5 ? terr + u_height[lo] : u_height[lo];
+  float hHi = u_isAgl[hi] > 0.5 ? terr + u_height[hi] : u_height[hi];
+  float f = hHi > hLo + 1.0 ? clamp((targetASL - hLo) / (hHi - hLo), 0.0, 1.0) : 0.0;
+
+  vec4 a = mix(texture(u_frameA, u_tileOff[lo] + tl), texture(u_frameB, u_tileOff[lo] + tl), u_frameMix);
+  vec4 b = mix(texture(u_frameA, u_tileOff[hi] + tl), texture(u_frameB, u_tileOff[hi] + tl), u_frameMix);
+  // A level that is underground here carries no usable wind; lean on the other.
+  if (a.a < 0.5 && b.a >= 0.5) f = 1.0;
+  else if (b.a < 0.5 && a.a >= 0.5) f = 0.0;
+
+  vec3 wa = vec3(mix(u_uvScale[lo].x, u_uvScale[lo].y, a.r),
+                 mix(u_uvScale[lo].z, u_uvScale[lo].w, a.g),
+                 mix(u_wScale[lo].x, u_wScale[lo].y, a.b) * u_wFactor[lo]);
+  vec3 wb = vec3(mix(u_uvScale[hi].x, u_uvScale[hi].y, b.r),
+                 mix(u_uvScale[hi].z, u_uvScale[hi].w, b.g),
+                 mix(u_wScale[hi].x, u_wScale[hi].y, b.b) * u_wFactor[hi]);
+  return vec4(mix(wa, wb, f), max(a.a, b.a));
+}
+
+// Height above ground of ladder rung j, and the gap around it (for converting
+// vertical velocity into movement along the ladder).
+float ladderAgl(int j) { return u_aglLadder[clamp(j, 0, u_ladderLen - 1)]; }
+
+float ladderGap(float sigma) {
+  if (u_ladderLen < 2) return 1.0;
+  float s = sigma * float(u_ladderLen - 1);
+  int j = int(clamp(s, 0.0, float(u_ladderLen - 2)));
+  return max(ladderAgl(j + 1) - ladderAgl(j), 5.0);
+}
+
 // Sampled wind at (pos, sigma): returns earth u, v (m/s), w (m/s), valid.
 // heightM out = meters ASL, terrain-conforming per levelAgl.
 vec4 sampleWind(vec2 pos, float sigma, float terr, out float heightM) {
+  if (u_useLadder > 0.5) {
+    // sigma indexes the AGL ladder, so a particle keeps its height above the
+    // ground as it travels — 10 m stays 10 m up whether it is over the valley
+    // floor or the summit.
+    float sL = sigma * float(u_ladderLen - 1);
+    int jL = u_ladderLen > 1 ? int(clamp(sL, 0.0, float(u_ladderLen - 2))) : 0;
+    float fL = u_ladderLen > 1 ? clamp(sL - float(jL), 0.0, 1.0) : 0.0;
+    float agl = mix(ladderAgl(jL), ladderAgl(jL + 1), fL);
+    heightM = terr + agl;
+    return windAtAgl(pos, agl, terr);
+  }
   float s = sigma * float(u_stackLen - 1);
   int j = u_stackLen > 1 ? int(clamp(s, 0.0, float(u_stackLen - 2))) : 0;
   int j1 = min(j + 1, u_stackLen - 1);
@@ -114,6 +186,7 @@ vec4 sampleWind(vec2 pos, float sigma, float terr, out float heightM) {
 
 float gapMeters(float sigma, float terr) {
   if (u_stackLen < 2) return 1.0;
+  if (u_useLadder > 0.5) return ladderGap(sigma);
   float s = sigma * float(u_stackLen - 1);
   int j = int(clamp(s, 0.0, float(u_stackLen - 2)));
   return max(levelAgl(j + 1, terr) - levelAgl(j, terr), 30.0);
@@ -282,7 +355,8 @@ void main() {
     float dlat = wind.y * sdt / 110540.0;
     npos += vec2(dlon / u_lonSpan, -dlat / u_latSpan);
     if (u_stackLen > 1) {
-      nsigma = clamp(nsigma + (wind.z * sdt) / gapMeters(nsigma, terr) / float(u_stackLen - 1), 0.0, 1.0);
+      float rungs = float((u_useLadder > 0.5 ? u_ladderLen : u_stackLen) - 1);
+      nsigma = clamp(nsigma + (wind.z * sdt) / gapMeters(nsigma, terr) / rungs, 0.0, 1.0);
     }
   }
 

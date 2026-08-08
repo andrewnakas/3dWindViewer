@@ -3,7 +3,7 @@
 // sink with the model's vertical velocity (see shaders.js).
 
 import { QUAD_VERT, UPDATE_FRAG, DRAW_VERT, DRAW_FRAG, MAX_STACK } from "./shaders.js";
-import { rampTextureData, volumetricIndices } from "./atmosphere.js";
+import { rampTextureData, volumetricIndices, ladderSourceIndices, AGL_LADDER } from "./atmosphere.js";
 import { FrameManager } from "./frames.js";
 
 const MAX_AGE = 90; // frames (float-state mode only)
@@ -118,9 +118,16 @@ export class WindLayer {
     // (at 2x, a particle 3 km up was drawn 1.5 km too high).
     this.altScale = opts.altScale ?? this.exaggeration;
     this.opacity = 1.0;
+    // Let terrain occlude particles behind it. Only meaningful when the map
+    // has 3D terrain (which writes depth); harmless otherwise.
+    this.depthOcclusion = opts.depthOcclusion ?? true;
     this.volumetric = opts.volumetric ?? true;
+    // Fly the particles at fixed heights above ground rather than on model
+    // surfaces, so "the 10 m wind" is 10 m off the deck everywhere.
+    this.useAglLadder = opts.useAglLadder ?? true;
+    this.aglLadder = opts.aglLadder ?? AGL_LADDER;
     this.levelIndices = this.volumetric
-      ? volumetricIndices(meta)
+      ? (this.useAglLadder ? ladderSourceIndices(meta) : volumetricIndices(meta))
       : [meta.levels.findIndex((l) => l.id === "10m")];
     this.particleCount = 262144;
     this.system = null;
@@ -232,11 +239,16 @@ export class WindLayer {
     const aglTop = levels.reduce(
       (m, lv) => (lv.kind === "height_agl" ? Math.max(m, lv.heightMeters) : m), 0
     ) + 40;
+
+    const ladder = new Float32Array(MAX_STACK);
+    const rungs = this.aglLadder.slice(0, MAX_STACK);
+    for (let k = 0; k < MAX_STACK; k++) ladder[k] = rungs[Math.min(k, rungs.length - 1)];
     const hx = 0.5 / (this.meta.tile.width * cols) * cols;
     const hy = 0.5 / (this.meta.tile.height * rows) * rows;
     const t = this.meta.terrain;
     return {
       len: L, tileOff, uvScale, wScale, wFactor, height, isAgl, aglTop,
+      ladder, ladderLen: rungs.length,
       tileScale: [1 / cols, 1 / rows],
       clampMin: [hx, hy],
       clampMax: [1 - hx, 1 - hy],
@@ -269,6 +281,9 @@ export class WindLayer {
     gl.uniform1fv(U.u_height, s.height);
     gl.uniform1fv(U.u_isAgl, s.isAgl);
     gl.uniform1f(U.u_aglTop, s.aglTop);
+    gl.uniform1fv(U.u_aglLadder, s.ladder);
+    gl.uniform1i(U.u_ladderLen, s.ladderLen);
+    gl.uniform1f(U.u_useLadder, this.useAglLadder ? 1.0 : 0.0);
     gl.uniform2fv(U.u_tileScale, s.tileScale);
     gl.uniform2fv(U.u_clampMin, s.clampMin);
     gl.uniform2fv(U.u_clampMax, s.clampMax);
@@ -446,7 +461,19 @@ export class WindLayer {
     gl.enable(gl.BLEND);
     // premultiplied over-blending: readable on bright satellite imagery
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-    gl.disable(gl.DEPTH_TEST);
+    // Depth-test against the terrain MapLibre has already drawn, so a ridge
+    // hides the air behind it. Without this, wind from kilometres beyond the
+    // skyline paints over the mountains and reads as a slab hanging in the
+    // sky — the flow looked detached from the terrain no matter how well the
+    // physics placed it. Depth writes stay off: the particles are translucent
+    // and must not occlude each other.
+    if (this.depthOcclusion) {
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+      gl.depthMask(false);
+    } else {
+      gl.disable(gl.DEPTH_TEST);
+    }
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, sys.curState.pos);

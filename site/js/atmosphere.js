@@ -46,6 +46,28 @@ export const VOLUMETRIC_IDS = ["10m", "925", "850", "700", "600", "500", "400", 
 // layer where wind and mountains actually meet.
 export const TERRAIN_IDS = ["10m", "80m", "925", "900", "850", "800", "750", "700", "650", "600"];
 
+// Heights above ground (metres) the particles actually fly at. HRRR only
+// carries 10 m and 80 m as real above-ground winds — everything above is a
+// pressure surface whose height depends on the terrain under it — so the wind
+// at each rung is interpolated from the model levels bracketing that height.
+// The result is a 10 m wind that is 10 m off the deck everywhere, a 150 m wind
+// at 150 m, and so on, rather than surfaces that drift relative to the ground.
+// Spacing is tight low down, where terrain shapes the flow most.
+export const AGL_LADDER = [10, 80, 150, 300, 600, 1000, 1500, 2200, 3200, 4500];
+
+// Model levels the ladder interpolates from: enough of the low pressure
+// surfaces to bracket every rung, over terrain from sea level to 4.5 km.
+export const LADDER_SOURCE_IDS = [
+  "10m", "80m", "1000", "950", "925", "900", "875", "850", "800", "700", "600", "500",
+];
+
+export function ladderSourceIndices(meta) {
+  return LADDER_SOURCE_IDS
+    .map((id) => meta.levels.find((l) => l.id === id))
+    .filter(Boolean)
+    .map((l) => l.index);
+}
+
 export function volumetricIndices(meta, ids = TERRAIN_IDS) {
   return ids
     .map((id) => meta.levels.find((l) => l.id === id))
