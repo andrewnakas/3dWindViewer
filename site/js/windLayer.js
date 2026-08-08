@@ -443,6 +443,11 @@ export class WindLayer {
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, sys.prevState.aux, 0);
     gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
     gl.viewport(0, 0, sys.size, sys.size);
+    // Re-bind immediately before drawing: with 3D terrain enabled MapLibre can
+    // run its own GL work between our useProgram above and this call, leaving a
+    // different program current and making the draw INVALID_OPERATION.
+    gl.useProgram(this.updateProg);
+    gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     sys.swap();
 
@@ -530,6 +535,8 @@ export class WindLayer {
     gl.activeTexture(gl.TEXTURE6);
     gl.bindTexture(gl.TEXTURE_2D, pair.texB);
 
+    gl.useProgram(this.drawProg);   // same reason as the update pass above
+    gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.LINES, 0, sys.size * sys.size * 2);
 
     gl.bindVertexArray(null);
