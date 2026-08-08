@@ -43,7 +43,9 @@ uniform vec2 u_tileOff[${MAX_STACK}];
 uniform vec4 u_uvScale[${MAX_STACK}];   // uMin, uMax, vMin, vMax
 uniform vec2 u_wScale[${MAX_STACK}];    // wMin, wMax (omega Pa/s)
 uniform float u_wFactor[${MAX_STACK}];  // m/s per Pa/s at this level
-uniform float u_height[${MAX_STACK}];   // meters ASL
+uniform float u_height[${MAX_STACK}];   // meters ASL, or AGL where u_isAgl
+uniform float u_isAgl[${MAX_STACK}];    // 1 = u_height is already above-ground
+uniform float u_aglTop;                 // top of the above-ground levels (m)
 uniform vec2 u_tileScale;
 uniform vec2 u_clampMin;
 uniform vec2 u_clampMax;
@@ -68,12 +70,22 @@ float terrainHeight(vec2 pos) {
   return mix(u_terrRange.x, u_terrRange.y, (t.r * 255.0 * 256.0 + t.g * 255.0) / 65535.0);
 }
 
-// Height of stack level j ABOVE the local terrain. Pressure levels sit at
-// their real altitude when above ground; where terrain rises past a level,
-// it collapses onto a thin near-surface floor, so the low stack conforms to
-// the ground everywhere (valleys AND ridges).
+// Height of stack level j ABOVE the local terrain.
+//
+// The 10 m and 80 m levels are already heights above ground — HRRR reports
+// them that way — so they ride the terrain at exactly that height and must
+// NOT have the surface elevation subtracted from them.
+//
+// Pressure levels are altitudes above sea level, so their height above ground
+// is height - terrain. Where terrain rises past one it would go negative;
+// rather than let the column invert, squeeze it into the shrinking space
+// under the next valid level. That keeps the stack ordered and near the
+// ground over high terrain without inventing a fixed ladder of heights.
 float levelAgl(int j, float terr) {
-  return max(u_height[j] - terr, 10.0 + 60.0 * float(j));
+  if (u_isAgl[j] > 0.5) return u_height[j];
+  float agl = u_height[j] - terr;
+  float floorAgl = u_aglTop + 40.0 * float(j);
+  return agl > floorAgl ? agl : floorAgl;
 }
 
 // Sampled wind at (pos, sigma): returns earth u, v (m/s), w (m/s), valid.
@@ -350,7 +362,10 @@ void main() {
 
   // Terrain base rises with the map's own exaggeration so particles hug the
   // rendered surface; height above ground gets the (separate) altitude scale.
-  float z = terr * u_exagMerc + max(heightM - terr, 8.0) * u_altMerc;
+  // levelAgl already guarantees a positive height above ground, so draw it as
+  // computed — clamping here would quietly lift the surface levels off the
+  // terrain they are supposed to be hugging.
+  float z = terr * u_exagMerc + max(heightM - terr, 0.0) * u_altMerc;
   gl_Position = u_matrix * vec4(mx, my, z, 1.0);
 
   float endDim = (end == 0) ? 0.2 : 1.0;

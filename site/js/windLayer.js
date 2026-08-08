@@ -216,6 +216,7 @@ export class WindLayer {
     const wScale = new Float32Array(MAX_STACK * 2);
     const wFactor = new Float32Array(MAX_STACK);
     const height = new Float32Array(MAX_STACK);
+    const isAgl = new Float32Array(MAX_STACK);
     for (let k = 0; k < MAX_STACK; k++) {
       const lv = levels[Math.min(k, L - 1)];
       tileOff[k * 2] = (lv.index % cols) / cols;
@@ -224,12 +225,18 @@ export class WindLayer {
       wScale.set([lv.wMin ?? -1, lv.wMax ?? 1], k * 2);
       wFactor[k] = lv.wFactor ?? 0;
       height[k] = lv.heightMeters;
+      isAgl[k] = lv.kind === "height_agl" ? 1 : 0;
     }
+    // Pressure levels forced below ground stack above the highest true
+    // above-ground level rather than from an arbitrary zero.
+    const aglTop = levels.reduce(
+      (m, lv) => (lv.kind === "height_agl" ? Math.max(m, lv.heightMeters) : m), 0
+    ) + 40;
     const hx = 0.5 / (this.meta.tile.width * cols) * cols;
     const hy = 0.5 / (this.meta.tile.height * rows) * rows;
     const t = this.meta.terrain;
     return {
-      len: L, tileOff, uvScale, wScale, wFactor, height,
+      len: L, tileOff, uvScale, wScale, wFactor, height, isAgl, aglTop,
       tileScale: [1 / cols, 1 / rows],
       clampMin: [hx, hy],
       clampMax: [1 - hx, 1 - hy],
@@ -260,6 +267,8 @@ export class WindLayer {
     gl.uniform2fv(U.u_wScale, s.wScale);
     gl.uniform1fv(U.u_wFactor, s.wFactor);
     gl.uniform1fv(U.u_height, s.height);
+    gl.uniform1fv(U.u_isAgl, s.isAgl);
+    gl.uniform1f(U.u_aglTop, s.aglTop);
     gl.uniform2fv(U.u_tileScale, s.tileScale);
     gl.uniform2fv(U.u_clampMin, s.clampMin);
     gl.uniform2fv(U.u_clampMax, s.clampMax);
