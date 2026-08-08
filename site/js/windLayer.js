@@ -175,6 +175,15 @@ export class WindLayer {
     this.drawU = uniforms(gl, this.drawProg);
     this.vao = gl.createVertexArray();
 
+    // Stand-in for samplers whose real texture has not loaded yet.
+    this.blankTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.blankTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+      new Uint8Array([0, 0, 128, 255]));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+
     this.rampTex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.rampTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, rampTextureData());
@@ -263,7 +272,16 @@ export class WindLayer {
     const hi = this.meta.terrainHi;
     const tex = this.frames?.terrainTex;
     gl.uniform1f(U.u_hasTerrHi, tex ? 1.0 : 0.0);
-    if (!tex) return;
+    if (!tex) {
+      // A declared sampler must still point at a complete texture even on the
+      // branch that never reads it, or the draw is INVALID_OPERATION. This
+      // fires on the frames before the terrain PNG finishes uploading.
+      gl.uniform1i(U.u_terrHi, unit);
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.bindTexture(gl.TEXTURE_2D, this.blankTex);
+      gl.activeTexture(gl.TEXTURE0);
+      return;
+    }
     gl.uniform2f(U.u_terrHiRange, hi.hMin, hi.hMax);
     gl.uniform1i(U.u_terrHi, unit);
     gl.activeTexture(gl.TEXTURE0 + unit);
