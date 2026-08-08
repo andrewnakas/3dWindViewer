@@ -31,8 +31,22 @@ ATLAS_COLS, ATLAS_ROWS = 7, 6  # 42 slots: 41 levels + terrain tile
 TERRAIN_TILE_INDEX = 41  # surface elevation, 16-bit packed in R/G
 ATLAS_W = ATLAS_COLS * TILE_W   # 3150
 ATLAS_H = ATLAS_ROWS * TILE_H   # 1590
-assert len(LEVELS) <= ATLAS_COLS * ATLAS_ROWS
+assert len(LEVELS) < ATLAS_COLS * ATLAS_ROWS, "no free slot left for the terrain tile"
+assert TERRAIN_TILE_INDEX >= len(LEVELS), "terrain tile would overwrite a level"
 assert ATLAS_W <= 4096 and ATLAS_H <= 4096, "atlas exceeds safe WebGL texture size"
+
+# Standalone high-resolution terrain texture (its own PNG, not an atlas tile).
+# The wind atlas is deliberately coarse — 12.8 km cells are plenty for a
+# smooth wind field — but terrain physics reads the SLOPE of the ground, and
+# it has to place particles on the same surface MapLibre draws. Both demand
+# far more resolution than the atlas, hence a separate texture at the largest
+# size that is still safe to upload (~1.4 km cells).
+TERRAIN_HI_W, TERRAIN_HI_H = 4096, 2560
+assert TERRAIN_HI_W <= 4096 and TERRAIN_HI_H <= 4096, "terrain exceeds safe texture size"
+
+# Curvature length scale (eta): roughly half the wavelength of the terrain
+# features that should drive ridge speed-up. ~2 cells of the hi-res grid.
+CURV_LENGTH_M = 2800.0
 
 # HRRR native grid / projection (verified against the dataset's spatial_ref).
 LCC_PROJ = (

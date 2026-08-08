@@ -94,9 +94,12 @@ def encode_frame(frame, valid, scales, terrain=None, t_range=None):
     return atlas
 
 
-def write_output(out_dir, frames_by_lead, scales, init_time_iso, heights, terrain):
+def write_output(
+    out_dir, frames_by_lead, scales, init_time_iso, heights, terrain, terrain_hi=None
+):
     """frames_by_lead: {lead: (frame, valid)}; heights: per-level meters ASL;
-    terrain: (TILE_H, TILE_W) surface elevation in meters."""
+    terrain: (TILE_H, TILE_W) surface elevation in meters;
+    terrain_hi: optional meta block for the standalone hi-res terrain PNG."""
     out = Path(out_dir)
     (out / "frames").mkdir(parents=True, exist_ok=True)
 
@@ -118,6 +121,7 @@ def write_output(out_dir, frames_by_lead, scales, init_time_iso, heights, terrai
         "tile": {"width": TILE_W, "height": TILE_H},
         "atlas": {"cols": ATLAS_COLS, "rows": ATLAS_ROWS},
         "terrain": {"index": TERRAIN_TILE_INDEX, "hMin": t_range[0], "hMax": t_range[1]},
+        **({"terrainHi": terrain_hi} if terrain_hi else {}),
         "frames": frame_entries,
         "levels": [
             {

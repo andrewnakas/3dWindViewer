@@ -43,7 +43,9 @@ uniform vec2 u_tileOff[${MAX_STACK}];
 uniform vec4 u_uvScale[${MAX_STACK}];   // uMin, uMax, vMin, vMax
 uniform vec2 u_wScale[${MAX_STACK}];    // wMin, wMax (omega Pa/s)
 uniform float u_wFactor[${MAX_STACK}];  // m/s per Pa/s at this level
-uniform float u_height[${MAX_STACK}];   // meters ASL
+uniform float u_height[${MAX_STACK}];   // meters ASL, or AGL where u_isAgl
+uniform float u_isAgl[${MAX_STACK}];    // 1 = u_height is already above-ground
+uniform float u_aglTop;                 // top of the above-ground levels (m)
 uniform vec2 u_tileScale;
 uniform vec2 u_clampMin;
 uniform vec2 u_clampMax;
@@ -51,18 +53,39 @@ uniform vec2 u_clampMax;
 uniform vec2 u_terrOff;    // atlas UV of the terrain tile
 uniform vec2 u_terrRange;  // hMin, hMax meters
 
+// Standalone high-resolution terrain (own PNG, own texture unit). Regridding
+// flattens slopes, so terrain physics reads this instead of the coarse atlas
+// tile where it is available; RG = elevation, B = precomputed curvature.
+uniform sampler2D u_terrHi;
+uniform float u_hasTerrHi;
+uniform vec2 u_terrHiRange;
+
 float terrainHeight(vec2 pos) {
+  if (u_hasTerrHi > 0.5) {
+    vec4 t = texture(u_terrHi, clamp(pos, 0.0, 1.0));
+    return mix(u_terrHiRange.x, u_terrHiRange.y, (t.r * 255.0 * 256.0 + t.g * 255.0) / 65535.0);
+  }
   vec2 uv = u_terrOff + clamp(pos, u_clampMin, u_clampMax) * u_tileScale;
   vec4 t = texture(u_frameA, uv);  // terrain tile is identical in every frame
   return mix(u_terrRange.x, u_terrRange.y, (t.r * 255.0 * 256.0 + t.g * 255.0) / 65535.0);
 }
 
-// Height of stack level j ABOVE the local terrain. Pressure levels sit at
-// their real altitude when above ground; where terrain rises past a level,
-// it collapses onto a thin near-surface floor, so the low stack conforms to
-// the ground everywhere (valleys AND ridges).
+// Height of stack level j ABOVE the local terrain.
+//
+// The 10 m and 80 m levels are already heights above ground — HRRR reports
+// them that way — so they ride the terrain at exactly that height and must
+// NOT have the surface elevation subtracted from them.
+//
+// Pressure levels are altitudes above sea level, so their height above ground
+// is height - terrain. Where terrain rises past one it would go negative;
+// rather than let the column invert, squeeze it into the shrinking space
+// under the next valid level. That keeps the stack ordered and near the
+// ground over high terrain without inventing a fixed ladder of heights.
 float levelAgl(int j, float terr) {
-  return max(u_height[j] - terr, 10.0 + 60.0 * float(j));
+  if (u_isAgl[j] > 0.5) return u_height[j];
+  float agl = u_height[j] - terr;
+  float floorAgl = u_aglTop + 40.0 * float(j);
+  return agl > floorAgl ? agl : floorAgl;
 }
 
 // Sampled wind at (pos, sigma): returns earth u, v (m/s), w (m/s), valid.
@@ -97,6 +120,120 @@ float gapMeters(float sigma, float terr) {
 }
 `;
 
+// Terrain-driven flow physics. UPDATE_FRAG only — never include this in
+// DRAW_VERT, which runs twice per particle and is the expensive pass.
+//
+// The model wind is a 12 km-scale field; terrain forces it in ways the coarse
+// grid cannot show. Three effects, all faded out with height above ground:
+//
+//   w_oro = u . grad(h)          exact no-penetration boundary condition:
+//                                flow crossing a slope must climb it
+//   Ww = 1 + gS*Os + gC*Oc       Liston-Elder (MicroMet) speed weighting:
+//                                windward slopes and ridge crests speed up,
+//                                lee slopes and valleys slow down
+//   theta -= 0.5*slope*sin(2d)   Ryan (1977) diverting: oblique flow turns
+//                                toward alignment with the contours
+//
+// Os (slope in the wind direction) and Oc (curvature) are normalized to
+// [-0.5, 0.5] so Ww stays in [0.5, 1.5] when gS + gC = 1.
+const TERRAIN_PHYSICS = `
+uniform float u_tp;          // master gain; 0 disables the whole block
+uniform vec2 u_terrTexel;    // one terrain cell in normalized pos units
+uniform float u_oroDecayH;   // e-folding height (m AGL) of terrain influence
+uniform float u_gammaS;      // MicroMet slope weight
+uniform float u_gammaC;      // MicroMet curvature weight
+uniform float u_slopeScale;  // slope (m/m) -> Omega_s
+uniform float u_curvScale;   // curvature (1/m) -> Omega_c
+uniform float u_curvLength;  // curvature length scale (m)
+uniform float u_ryanGain;
+uniform float u_leeGain;     // lee sheltering strength; 0 skips the raymarch
+uniform float u_leeDistM;    // how far upwind to look for sheltering terrain
+
+// Winstral's Sx: the steepest slope to any point upwind within u_leeDistM.
+// Positive means something upwind stands higher than here, so this spot sits
+// in a wake and the flow over it is slack. Speed-up and lift alone cannot
+// produce that — they only know the ground directly underfoot, which is why
+// terrain downscaling schemes carry this term separately.
+float shelterTangent(vec2 pos, vec2 dirN, float terr, float lat) {
+  float mx = 0.0;
+  float mPerLon = 111320.0 * max(cos(radians(lat)), 0.05);
+  for (int i = 1; i <= 8; i++) {
+    float d = u_leeDistM * float(i) / 8.0;
+    // step upwind; pos.y runs southward so the north component flips
+    vec2 up = pos - vec2(dirN.x * d / mPerLon / u_lonSpan,
+                        -dirN.y * d / 110540.0 / u_latSpan);
+    mx = max(mx, (terrainHeight(up) - terr) / d);
+  }
+  return mx;
+}
+
+// Central-difference terrain gradient (m/m, x=east y=north) plus curvature,
+// normalized to [-0.5, 0.5]. Note pos.y increases SOUTHWARD, so the north
+// sample is at -y and the north-south difference is (hN - hS).
+void terrainDerivs(vec2 pos, float terr, float lat, out vec2 grad, out float omegaC) {
+  float hE = terrainHeight(pos + vec2(u_terrTexel.x, 0.0));
+  float hW = terrainHeight(pos - vec2(u_terrTexel.x, 0.0));
+  float hN = terrainHeight(pos - vec2(0.0, u_terrTexel.y));
+  float hS = terrainHeight(pos + vec2(0.0, u_terrTexel.y));
+  float dxm = u_lonSpan * u_terrTexel.x * 111320.0 * max(cos(radians(lat)), 0.05);
+  float dym = u_latSpan * u_terrTexel.y * 110540.0;
+  grad = vec2((hE - hW) / (2.0 * dxm), (hN - hS) / (2.0 * dym));
+
+  if (u_hasTerrHi > 0.5) {
+    // Precomputed: normalizing curvature needs a domain-wide maximum, which
+    // only the pipeline can know. 0.5 encodes flat ground.
+    omegaC = texture(u_terrHi, clamp(pos, 0.0, 1.0)).b - 0.5;
+  } else {
+    // positive on convex ground (ridges, knobs), negative in bowls and valleys
+    float curvRaw = ((terr - 0.5 * (hW + hE)) + (terr - 0.5 * (hN + hS))) / (4.0 * u_curvLength);
+    omegaC = clamp(curvRaw * u_curvScale, -0.5, 0.5);
+  }
+}
+
+vec3 applyTerrainPhysics(vec2 pos, vec3 wind, float terr, float agl, float lat) {
+  float fade = u_tp * exp(-max(agl, 0.0) / u_oroDecayH);
+  if (fade < 0.01 || length(wind.xy) < 0.1) return wind;
+
+  vec2 grad;
+  float omegaC;
+  terrainDerivs(pos, terr, lat, grad, omegaC);
+  vec2 dir = normalize(wind.xy);
+
+  float omegaS = clamp(dot(dir, grad) * u_slopeScale, -0.5, 0.5);
+  float Ww = clamp(1.0 + u_gammaS * omegaS + u_gammaC * omegaC, 0.5, 1.5);
+
+  // Ryan diverting: xi = uphill azimuth, d = angle from the wind to uphill.
+  // sin(2d) vanishes for straight up/downslope and cross-slope flow, and peaks
+  // at 45 degrees of obliquity — where terrain steering is strongest.
+  // Turning stays small (a few degrees) because it is proportional to the
+  // terrain angle, and a 2.1 km grid resolves ridges as 5-13 degree ramps
+  // rather than the 30+ degree walls they are. That is the grid's limit, not
+  // a weak constant — raise u_ryanGain to exaggerate, at the cost of fidelity.
+  float theta = atan(wind.y, wind.x);
+  float xi = atan(grad.y, grad.x);
+  float d = mod(xi - theta + 3.14159265, 6.28318531) - 3.14159265;
+  float delta = 0.0;
+  if (abs(d) <= 1.57079633) {
+    float slopeDeg = degrees(atan(length(grad)));
+    delta = -0.5 * radians(min(slopeDeg, 45.0)) * sin(2.0 * d) * u_ryanGain;
+  }
+  delta = clamp(delta, -0.5236, 0.5236) * fade;
+
+  float c = cos(delta), s = sin(delta);
+  vec2 h = mat2(c, s, -s, c) * wind.xy;
+  h *= mix(1.0, Ww, fade);
+
+  if (u_leeGain > 0.0) {
+    float sx = clamp(shelterTangent(pos, dir, terr, lat), 0.0, 0.5);
+    h *= 1.0 - u_leeGain * sx * 2.0 * fade;
+  }
+
+  // lift from the deflected wind: flow steered along the contours climbs less
+  float wOro = dot(h, grad) * fade;
+  return vec3(h, wind.z + wOro);
+}
+`;
+
 export const UPDATE_FRAG = `#version 300 es
 precision highp float;
 
@@ -114,8 +251,12 @@ uniform float u_maxAge;
 uniform float u_time;
 uniform vec2 u_spawnMin;   // respawn region (normalized), follows the viewport
 uniform vec2 u_spawnMax;
+uniform int u_substeps;
+
+#define MAX_SUBSTEPS 4
 
 ${COMMON}
+${TERRAIN_PHYSICS}
 
 void main() {
   vec4 sp = texture(u_statePos, v_uv);
@@ -123,17 +264,26 @@ void main() {
   vec2 pos = statePos(sp);
   float sigma = sa.r;
 
-  float terr = terrainHeight(pos);
-  float heightM;
-  vec4 wind = sampleWind(pos, sigma, terr, heightM);
-
-  float lat = u_north - pos.y * u_latSpan;
-  float dlon = wind.x * u_dt / (111320.0 * max(cos(radians(lat)), 0.05));
-  float dlat = wind.y * u_dt / 110540.0;
-  vec2 npos = pos + vec2(dlon / u_lonSpan, -dlat / u_latSpan);
+  // Integrate in substeps when the terrain is fine enough that one 90 s jump
+  // would clear a whole cell — a particle that leaps a ridge never feels it.
+  vec2 npos = pos;
   float nsigma = sigma;
-  if (u_stackLen > 1) {
-    nsigma = clamp(sigma + (wind.z * u_dt) / gapMeters(sigma, terr) / float(u_stackLen - 1), 0.0, 1.0);
+  vec4 wind = vec4(0.0);
+  float sdt = u_dt / float(u_substeps);
+  for (int k = 0; k < MAX_SUBSTEPS; k++) {
+    if (k >= u_substeps) break;
+    float terr = terrainHeight(npos);
+    float heightM;
+    wind = sampleWind(npos, nsigma, terr, heightM);
+    float lat = u_north - npos.y * u_latSpan;
+    wind.xyz = applyTerrainPhysics(npos, wind.xyz, terr, heightM - terr, lat);
+
+    float dlon = wind.x * sdt / (111320.0 * max(cos(radians(lat)), 0.05));
+    float dlat = wind.y * sdt / 110540.0;
+    npos += vec2(dlon / u_lonSpan, -dlat / u_latSpan);
+    if (u_stackLen > 1) {
+      nsigma = clamp(nsigma + (wind.z * sdt) / gapMeters(nsigma, terr) / float(u_stackLen - 1), 0.0, 1.0);
+    }
   }
 
   bool oob = npos.x < 0.0 || npos.x > 1.0 || npos.y < 0.0 || npos.y > 1.0 || wind.a < 0.5;
@@ -212,7 +362,10 @@ void main() {
 
   // Terrain base rises with the map's own exaggeration so particles hug the
   // rendered surface; height above ground gets the (separate) altitude scale.
-  float z = terr * u_exagMerc + max(heightM - terr, 8.0) * u_altMerc;
+  // levelAgl already guarantees a positive height above ground, so draw it as
+  // computed — clamping here would quietly lift the surface levels off the
+  // terrain they are supposed to be hugging.
+  float z = terr * u_exagMerc + max(heightM - terr, 0.0) * u_altMerc;
   gl_Position = u_matrix * vec4(mx, my, z, 1.0);
 
   float endDim = (end == 0) ? 0.2 : 1.0;

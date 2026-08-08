@@ -14,6 +14,7 @@ reproject LCC → lat/lon · downsample to ~12 km · rotate winds grid→earth
         ▼
 49 texture-atlas PNGs (one per forecast hour; 41 level tiles each, u/v in R/G,
 per-level scaling in meta.json)  ≈ 150 MB
+   + terrain.png — one ~2.1 km elevation + curvature texture for terrain flow
         │  deployed with the static site as one GitHub Pages artifact
         ▼
 MapLibre GL JS + custom WebGL2 layer: GPU particle advection sampling the
@@ -24,6 +25,23 @@ atlas, particles drawn at each level's altitude above 3D terrain
 - **No data in git**: `site/data/` exists only inside the Pages deployment artifact; a failed build leaves the previous forecast live.
 - **Terrain**: AWS Terrain Tiles (terrarium encoding) with adjustable exaggeration; Carto Dark Matter basemap.
 - **Particles**: [webgl-wind](https://github.com/mapbox/webgl-wind)-style GPU advection upgraded to WebGL2 with a **continuous vertical coordinate** — particles rise and sink with HRRR's vertical velocity (omega, atlas B channel), so orographic uplift and convection are real 3D motion between levels. Levels sit at each run's actual mean geopotential heights, and below-ground pressure levels (e.g. 925 hPa over the Rockies) are masked out using surface pressure. Falls back from float to packed-RGBA8 state on GPUs without float rendering (iOS).
+
+### Terrain flow physics
+
+HRRR's 12 km-regridded wind cannot show how air behaves against a specific ridge, so the update shader downscales it with four standard terrain-flow terms, each faded out with height above ground (toggle: *Terrain flow*).
+
+| Term | Effect |
+|---|---|
+| `w = u·∇h` (kinematic boundary condition) | air crossing a slope must climb it — windward updrafts, lee downdrafts |
+| Liston–Elder `Ww = 1 + γs·Ωs + γc·Ωc` | ridge crests and windward faces accelerate; valleys and lee slopes slow |
+| Ryan (1977) diverting | oblique flow turns toward alignment with the contours |
+| Winstral `Sx` | terrain standing upwind casts a wake, slowing the air in its lee |
+
+These read the *slope* of the ground and have to place particles on the surface you can see, so terrain ships as its own ~1.4 km texture (`terrain.png`: 16-bit elevation plus precomputed curvature) built from the **same terrarium DEM MapLibre renders**, not from HRRR's orography — the model smooths summits by 700–1600 m, which floats particles over valleys and buries them inside peaks. Downsampling keeps the max, not the mean, so summits survive: regional high points land within ~50 m of true.
+
+The default stack spans 10 m to 4.5 km, which is where air meets mountains; *Full column* extends it to the 12 km jet stream. Over SW Montana at 20 m/s the physics gives updrafts of ~2.8 m/s (99th percentile, peaks above 5 m/s) and ±4 m/s of speed variation, decaying to near nothing by 1500 m AGL. Total frame cost is about 1%.
+
+This is a downscaling correction, not new data: the point-forecast panel deliberately keeps showing the raw model sounding.
 
 ## Local development
 
