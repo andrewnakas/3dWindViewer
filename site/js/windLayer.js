@@ -134,12 +134,13 @@ export class WindLayer {
       oroDecayH: 800,   // terrain influence e-folds out over ~800 m AGL
       gammaS: 0.5,      // slope and curvature weights sum to 1 so the
       gammaC: 0.5,      // speed factor stays within [0.5, 1.5]
-      // Normalizations are calibrated so the 90th-percentile slope and
-      // curvature over mountainous terrain map to the +/-0.5 ends of the
-      // MicroMet range. Regridding flattens terrain, so these depend on the
-      // grid: values below are for the 12.8 km atlas tile.
+      // Slope normalization is calibrated so the 90th-percentile slope over
+      // mountainous terrain reaches the +/-0.5 ends of the MicroMet range.
+      // Regridding flattens terrain, so it depends on the grid: the 12.8 km
+      // atlas tile keeps far less slope than the 2.1 km terrain texture.
       slopeScale: 15.0,
-      curvScale: 35.0,
+      slopeScaleHi: 6.0,
+      curvScale: 35.0,     // atlas-tile fallback only; hi-res ships normalized
       curvLength: 12800.0,
       ryanGain: 1.0,
     };
@@ -168,6 +169,7 @@ export class WindLayer {
     gl.bindTexture(gl.TEXTURE_2D, null);
 
     this.frames = new FrameManager(gl, this.meta);
+    this.frames.loadTerrain(() => this.map.triggerRepaint());
     this.rebuildSystem();
     this.onReady?.(this);
   }
@@ -226,6 +228,20 @@ export class WindLayer {
       terrOff: t ? [(t.index % cols) / cols, Math.floor(t.index / cols) / rows] : [0, 0],
       terrRange: t ? [t.hMin, t.hMax] : [0, 0],
     };
+  }
+
+  // Both passes must resolve terrain identically or particles would be drawn
+  // at a different height than they were advected at.
+  setTerrainUniforms(gl, U, unit) {
+    const hi = this.meta.terrainHi;
+    const tex = this.frames?.terrainTex;
+    gl.uniform1f(U.u_hasTerrHi, tex ? 1.0 : 0.0);
+    if (!tex) return;
+    gl.uniform2f(U.u_terrHiRange, hi.hMin, hi.hMax);
+    gl.uniform1i(U.u_terrHi, unit);
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.activeTexture(gl.TEXTURE0); // leave the active unit where callers expect it
   }
 
   setStackUniforms(gl, U) {
@@ -304,15 +320,20 @@ export class WindLayer {
     gl.uniform2fv(U.u_spawnMax, spawn.max);
 
     const tp = this.tuning;
+    const hiRes = !!this.frames?.terrainTex;
+    const tSrc = hiRes ? this.meta.terrainHi : this.meta.tile;
     gl.uniform1f(U.u_tp, this.terrainPhysics ? tp.gain : 0.0);
-    gl.uniform2f(U.u_terrTexel, 1 / this.meta.tile.width, 1 / this.meta.tile.height);
+    gl.uniform2f(U.u_terrTexel, 1 / tSrc.width, 1 / tSrc.height);
     gl.uniform1f(U.u_oroDecayH, tp.oroDecayH);
     gl.uniform1f(U.u_gammaS, tp.gammaS);
     gl.uniform1f(U.u_gammaC, tp.gammaC);
-    gl.uniform1f(U.u_slopeScale, tp.slopeScale);
+    // Finer terrain resolves steeper slopes, so the normalization that maps
+    // slope onto the MicroMet range differs per grid.
+    gl.uniform1f(U.u_slopeScale, hiRes ? tp.slopeScaleHi : tp.slopeScale);
     gl.uniform1f(U.u_curvScale, tp.curvScale);
     gl.uniform1f(U.u_curvLength, tp.curvLength);
     gl.uniform1f(U.u_ryanGain, tp.ryanGain);
+    this.setTerrainUniforms(gl, U, 7);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, sys.curState.pos);
@@ -359,6 +380,7 @@ export class WindLayer {
     gl.uniform1f(D.u_maxAge, MAX_AGE);
     gl.uniform1f(D.u_opacity, this.opacity);
     gl.uniform1i(D.u_stateSize, sys.size);
+    this.setTerrainUniforms(gl, D, 7);
 
     gl.enable(gl.BLEND);
     // premultiplied over-blending: readable on bright satellite imagery

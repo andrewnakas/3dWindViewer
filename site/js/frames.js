@@ -93,6 +93,34 @@ export class FrameManager {
     return tex;
   }
 
+  // The hi-res terrain texture is time-invariant, so it loads once and stays
+  // outside the LRU. onLoad fires with the texture; failure is non-fatal —
+  // the caller falls back to the coarse terrain tile inside the atlas.
+  loadTerrain(onLoad) {
+    const hi = this.meta.terrainHi;
+    if (!hi?.file) return;
+    const url = `${this.basePath}${hi.file}?v=${this.version}`;
+    // Halving the texture on memory-constrained devices costs terrain detail
+    // but keeps the physics working where it would otherwise blow the budget.
+    const half = !!sessionStorage.getItem("lowmem");
+    fetch(url)
+      .then((r) => {
+        if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
+        return r.blob();
+      })
+      .then((blob) => {
+        const opts = { premultiplyAlpha: "none" };
+        if (half) Object.assign(opts, { resizeWidth: hi.width >> 1, resizeHeight: hi.height >> 1 });
+        return createImageBitmap(blob, opts).catch(() => createImageBitmap(blob));
+      })
+      .then((bmp) => {
+        this.terrainTex = this.upload(bmp);
+        bmp.close();
+        onLoad?.(this.terrainTex);
+      })
+      .catch((e) => console.warn("hi-res terrain unavailable, using atlas tile:", e.message));
+  }
+
   touch(lead) {
     const i = this.lru.indexOf(lead);
     if (i >= 0) this.lru.splice(i, 1);

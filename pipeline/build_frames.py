@@ -9,6 +9,7 @@ import logging
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import numpy as np
 
@@ -16,6 +17,7 @@ from config import LEAD_HOURS, LEVELS, PRESSURE_LEVELS, TILE_H, TILE_W, height_m
 from encode import compute_scales, write_output
 from hrrr_source import open_datasets, pick_init
 from reproject import build_index_map, regrid, rotate_winds
+from terrain import build_terrain_fields, write_terrain_png
 
 log = logging.getLogger("build_frames")
 
@@ -108,10 +110,28 @@ def main():
 
     index_map = build_index_map(prs.x.values, prs.y.values)
     heights = read_heights(prs, init)
-    terrain = regrid(
-        sfc.sel(init_time=init).isel(lead_time=0).geopotential_height_surface.values,
-        index_map,
-    )
+
+    orography = sfc.sel(init_time=init).isel(lead_time=0).geopotential_height_surface.values
+    # The atlas tile is ~4x coarser than native, so area-average first — point
+    # sampling would hit or miss ridge crests depending on lattice alignment.
+    terrain = regrid(orography, index_map, presmooth=4)
+
+    terrain_hi_meta = None
+    try:
+        elev, curv, valid_hi, curv_max = build_terrain_fields(
+            orography, prs.x.values, prs.y.values
+        )
+        terrain_hi_meta = write_terrain_png(
+            Path(args.out) / "terrain.png", elev, curv, valid_hi
+        )
+        terrain_hi_meta["file"] = "terrain.png"
+        log.info(
+            "hi-res terrain %dx%d, elev %.0f..%.0f m, curv max %.2e 1/m",
+            terrain_hi_meta["width"], terrain_hi_meta["height"],
+            terrain_hi_meta["hMin"], terrain_hi_meta["hMax"], curv_max,
+        )
+    except Exception as e:  # noqa: BLE001 - terrain physics degrades to the atlas tile
+        log.warning("hi-res terrain build failed (%s); frontend will use the atlas tile", e)
 
     frames_by_lead = {}
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
@@ -122,7 +142,9 @@ def main():
             log.info("lead %02d done (%d/%d)", lead, len(frames_by_lead), len(leads))
 
     scales = compute_scales([f for f, _ in frames_by_lead.values()])
-    meta = write_output(args.out, frames_by_lead, scales, init_iso, heights, terrain)
+    meta = write_output(
+        args.out, frames_by_lead, scales, init_iso, heights, terrain, terrain_hi_meta
+    )
 
     log.info(
         "wrote %d frames to %s in %.1f min (init %s)",

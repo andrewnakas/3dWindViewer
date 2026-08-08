@@ -51,7 +51,18 @@ uniform vec2 u_clampMax;
 uniform vec2 u_terrOff;    // atlas UV of the terrain tile
 uniform vec2 u_terrRange;  // hMin, hMax meters
 
+// Standalone high-resolution terrain (own PNG, own texture unit). Regridding
+// flattens slopes, so terrain physics reads this instead of the coarse atlas
+// tile where it is available; RG = elevation, B = precomputed curvature.
+uniform sampler2D u_terrHi;
+uniform float u_hasTerrHi;
+uniform vec2 u_terrHiRange;
+
 float terrainHeight(vec2 pos) {
+  if (u_hasTerrHi > 0.5) {
+    vec4 t = texture(u_terrHi, clamp(pos, 0.0, 1.0));
+    return mix(u_terrHiRange.x, u_terrHiRange.y, (t.r * 255.0 * 256.0 + t.g * 255.0) / 65535.0);
+  }
   vec2 uv = u_terrOff + clamp(pos, u_clampMin, u_clampMax) * u_tileScale;
   vec4 t = texture(u_frameA, uv);  // terrain tile is identical in every frame
   return mix(u_terrRange.x, u_terrRange.y, (t.r * 255.0 * 256.0 + t.g * 255.0) / 65535.0);
@@ -124,10 +135,10 @@ uniform float u_curvScale;   // curvature (1/m) -> Omega_c
 uniform float u_curvLength;  // curvature length scale (m)
 uniform float u_ryanGain;
 
-// Central-difference terrain gradient (m/m, x=east y=north) plus the
-// Liston-Elder 4-neighbour curvature. Note pos.y increases SOUTHWARD, so the
-// north sample is at -y and the north-south difference is (hN - hS).
-void terrainDerivs(vec2 pos, float terr, float lat, out vec2 grad, out float curvRaw) {
+// Central-difference terrain gradient (m/m, x=east y=north) plus curvature,
+// normalized to [-0.5, 0.5]. Note pos.y increases SOUTHWARD, so the north
+// sample is at -y and the north-south difference is (hN - hS).
+void terrainDerivs(vec2 pos, float terr, float lat, out vec2 grad, out float omegaC) {
   float hE = terrainHeight(pos + vec2(u_terrTexel.x, 0.0));
   float hW = terrainHeight(pos - vec2(u_terrTexel.x, 0.0));
   float hN = terrainHeight(pos - vec2(0.0, u_terrTexel.y));
@@ -135,8 +146,16 @@ void terrainDerivs(vec2 pos, float terr, float lat, out vec2 grad, out float cur
   float dxm = u_lonSpan * u_terrTexel.x * 111320.0 * max(cos(radians(lat)), 0.05);
   float dym = u_latSpan * u_terrTexel.y * 110540.0;
   grad = vec2((hE - hW) / (2.0 * dxm), (hN - hS) / (2.0 * dym));
-  // positive on convex ground (ridges, knobs), negative in bowls and valleys
-  curvRaw = ((terr - 0.5 * (hW + hE)) + (terr - 0.5 * (hN + hS))) / (4.0 * u_curvLength);
+
+  if (u_hasTerrHi > 0.5) {
+    // Precomputed: normalizing curvature needs a domain-wide maximum, which
+    // only the pipeline can know. 0.5 encodes flat ground.
+    omegaC = texture(u_terrHi, clamp(pos, 0.0, 1.0)).b - 0.5;
+  } else {
+    // positive on convex ground (ridges, knobs), negative in bowls and valleys
+    float curvRaw = ((terr - 0.5 * (hW + hE)) + (terr - 0.5 * (hN + hS))) / (4.0 * u_curvLength);
+    omegaC = clamp(curvRaw * u_curvScale, -0.5, 0.5);
+  }
 }
 
 vec3 applyTerrainPhysics(vec2 pos, vec3 wind, float terr, float agl, float lat) {
@@ -144,12 +163,11 @@ vec3 applyTerrainPhysics(vec2 pos, vec3 wind, float terr, float agl, float lat) 
   if (fade < 0.01 || length(wind.xy) < 0.1) return wind;
 
   vec2 grad;
-  float curvRaw;
-  terrainDerivs(pos, terr, lat, grad, curvRaw);
+  float omegaC;
+  terrainDerivs(pos, terr, lat, grad, omegaC);
   vec2 dir = normalize(wind.xy);
 
   float omegaS = clamp(dot(dir, grad) * u_slopeScale, -0.5, 0.5);
-  float omegaC = clamp(curvRaw * u_curvScale, -0.5, 0.5);
   float Ww = clamp(1.0 + u_gammaS * omegaS + u_gammaC * omegaC, 0.5, 1.5);
 
   // Ryan diverting: xi = uphill azimuth, d = angle from the wind to uphill.
